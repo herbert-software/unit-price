@@ -1,0 +1,830 @@
+{
+  "corpusSize": 440,
+  "tier1": {
+    "lane": "tier1",
+    "total": 440,
+    "recall": {
+      "unitSize": 0.9772727272727273,
+      "quantity": 0.6454545454545455,
+      "totalAmount": 0.6318181818181818
+    },
+    "computability": 0.631578947368421,
+    "quantityAccuracy": 0.9791666666666666,
+    "perUnitError": 0.0009377627133107225,
+    "failures": [
+      {
+        "index": 17,
+        "title": "Member's Mark 饮用天然水",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 21,
+        "title": "MM 现泡铂金黑咖啡 15瓶",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 28,
+        "title": "伊藤园大麦苗风味饮料4.2千克",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 28,
+        "title": "伊藤园大麦苗风味饮料4.2千克",
+        "reason": "quantity null != samPkgNum 12"
+      },
+      {
+        "index": 44,
+        "title": "进口 蜜桃桃汁饮料 275克*12瓶",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 46,
+        "title": "恬蜜光年 多肉爆汁葡萄复合果汁饮品 270g x15",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 51,
+        "title": "keepsweet 恬蜜光年 爆汁多肉柑橘复合果汁饮品  270g*15",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 55,
+        "title": "MM 有机玉米汁 300g*24",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 58,
+        "title": "Unif 樱桃番茄NFC复合果蔬汁 270gx12",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 62,
+        "title": "獭祭 进口纯米大吟酿39清酒(发酵酒) 720mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 94,
+        "title": "皇家礼炮 进口21年威士忌 700ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 95,
+        "title": "波摩15年单一麦芽苏格兰威士忌700mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 96,
+        "title": "麦卡伦 进口18年单一麦芽苏格兰威士忌 700mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 98,
+        "title": "大摩DALMORE12年单一麦芽威士忌700ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 100,
+        "title": "慕赫 进口 16年单一麦芽威士忌 750mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 101,
+        "title": "苏格登 进口12年单一麦芽苏格兰威士忌 1L",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 103,
+        "title": "雅柏（Ardbeg）阿贝5年 单一麦芽威士忌 700ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 104,
+        "title": "乐加维林16年单一麦芽威士忌700mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 105,
+        "title": "泰斯卡 进口10年单一麦芽苏格兰威士忌 1L",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 106,
+        "title": "波摩 进口 18年单一麦芽苏格兰威士忌尊享版礼盒 700mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 107,
+        "title": "雅柏（Ardbeg）阿贝10年 单一麦芽威士忌 700ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 108,
+        "title": "MM 进口 苏格兰高地25年单一麦芽威士忌 700mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 109,
+        "title": "白州 进口 12年单一麦芽日本威士忌 700mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 111,
+        "title": "芝华士 12年威士忌 1.5L",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 112,
+        "title": "麦卡伦 英国进口 12年单一麦芽苏格兰威士忌 700mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 115,
+        "title": "MM 进口12年苏格兰威士忌 1.75升",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 116,
+        "title": "MM 进口苏格兰高地8年单一麦芽威士忌 700ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 117,
+        "title": "尊尼获加 进口黑牌12年调配苏格兰威士忌 1.75升",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 118,
+        "title": "格兰菲迪12年单一麦芽苏格兰威士忌 1L",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 123,
+        "title": "MACALLAN麦卡伦12年双桶单一麦芽威士忌700ML",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 124,
+        "title": "MM18年苏格兰威士忌 700ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 125,
+        "title": "大摩 进口12年苏格兰单一麦芽威士忌 700ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 126,
+        "title": "麦卡伦MACALLAN 15年双桶单一麦芽威士忌 43度 700ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 127,
+        "title": "百富Balvenie 12年双桶单一麦芽威士忌 700ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 128,
+        "title": "轩尼诗 进口X.O干邑白兰地 1.5升",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 136,
+        "title": "人头马 进口X.O优质香槟区干邑白兰地 700mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 137,
+        "title": "轩尼诗 进口 X.O干邑白兰地 700毫升",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 146,
+        "title": "马爹利 法国进口  XO干邑白兰地 700ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 147,
+        "title": "MM XO干邑白兰地 700ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 148,
+        "title": "COINTREAU Noir 70cl 干邑风味利口酒700ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 149,
+        "title": "活灵魂酒庄红葡萄酒ALMAVIVA2021年",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 151,
+        "title": "PENFOLDS奔富BIN149赤霞珠红葡萄酒750ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 153,
+        "title": "帕斯卡酒庄（PASQUA）经典阿玛罗尼红葡萄酒15度750ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 155,
+        "title": "木桐酒庄副牌红葡萄酒 2017年 750ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 161,
+        "title": "梦巴黎经典系列干型起泡葡萄酒11.5度750ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 165,
+        "title": "作品一号酒庄红葡萄酒2021年",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 166,
+        "title": "奔富   加州系列bin 600 赤霞珠设拉子红酒 750ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 167,
+        "title": "拉图嘉利酒庄红葡萄酒2021年 750ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 168,
+        "title": "PENFOLDS奔富葛兰许BIN95干红葡萄酒750ML",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 170,
+        "title": "帕斯卡经典阿玛罗尼·双星礼颂套装",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 171,
+        "title": "凯雅罗莎酒庄藤下诗 意大利 超级托斯卡纳IGT红葡萄酒14.5度750ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 176,
+        "title": "进口 皮耶侯奇酒庄法国干红葡萄酒 2023年 750mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 186,
+        "title": "宝尚父子 进口  勃艮第科通特级园红葡萄酒 2013年 750mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 188,
+        "title": "1851 进口珍藏梅洛红葡萄酒 750ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 201,
+        "title": "酩悦粉红香槟起泡葡萄酒盒装",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 202,
+        "title": "奔富 进口特瓶LOT.518葡萄酒 750mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 203,
+        "title": "法国梦巴黎果香礼袋",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 206,
+        "title": "拉菲罗斯柴尔德珍宝红葡萄酒 2016年 750ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 211,
+        "title": "贝伦酒庄 勃艮第 梅尔居雷村庄级白葡萄酒12.5度750ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 221,
+        "title": "PENFOLDS奔富BIN389赤霞珠设拉子干红葡萄酒750ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 227,
+        "title": "拉菲 进口 珍宝干红葡萄酒2017年750mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 234,
+        "title": "奔富 进口BIN389红葡萄酒 750mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 247,
+        "title": "PENFOLDS奔富BIN704赤霞珠干红葡萄酒750ML",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 251,
+        "title": "La Chapelle  进口 法国嘉伯乐小教堂红葡萄酒2000 750mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 259,
+        "title": "红酒礼品袋",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 261,
+        "title": "龙船酒庄红葡萄酒CHATEAU BEYCHEVELLE 2022年",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 296,
+        "title": "奔富 BIN150 玛拉南戈设拉子红葡萄酒 750mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 300,
+        "title": "MM 进口夏布利一级园干白葡萄酒",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 319,
+        "title": "LFE 进口埃德华兹900单一葡萄园干红葡萄酒 750mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 327,
+        "title": "茅台 53%vol贵州茅台酒(酱香型白酒)厚德致远 500ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 328,
+        "title": "君品习酒 2023年 酱香型白酒 53度 500mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 329,
+        "title": "茅台 53%vol贵州茅台酒 醒狮戏珠 500ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 331,
+        "title": "茅台 53度白酒 750mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 332,
+        "title": "古井贡酒 年份原浆(古16) 50%vol浓香型白酒 750ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 334,
+        "title": "水井坊 52%vol水井坊酒 井台(25周年纪念) 750ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 335,
+        "title": "贵州茅台酒 53度 酱香型白酒 1L",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 336,
+        "title": "茅台 53%vol贵州茅台酒(酱香型白酒) 牛年 500ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 337,
+        "title": "习酒 窖藏1988白酒 750ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 338,
+        "title": "贵州茅台酒(蛇年) 酱香型白酒 53度 500mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 339,
+        "title": "国窖1573 2023年产 浓香型白酒 52度 500mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 340,
+        "title": "贵州茅台酒 53度 6L",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 341,
+        "title": "古越龙山 绍兴花雕酒 10年 1L",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 343,
+        "title": "茅台 贵州茅台酒(精品) 酱香型白酒 53度 500mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 344,
+        "title": "汾酒青花20 53度 750mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 345,
+        "title": "五粮液 52度浓香型白酒 500mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 347,
+        "title": "古井贡 酒年份原浆(古20) 52%vol浓香型白酒 750ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 348,
+        "title": "五粮液九龙坛 浓香型白酒 52度 1.5L",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 349,
+        "title": "五粮液凤坛 浓香型白酒 52度 1.5L",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 351,
+        "title": "国窖1573 2022年 红花釉 浓香型白酒 52度 568mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 353,
+        "title": "五粮液 经典 2020年浓香型白酒 52度 500mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 354,
+        "title": "五粮液 52度华堂白酒 500ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 355,
+        "title": "茅台 43%vol贵州茅台酒(酱香型白酒)  500ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 356,
+        "title": "茅台 53%vol茅台酒 1.5L",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 357,
+        "title": "茅台 43%vol贵州茅台酒(酱香型白酒) 1L",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 361,
+        "title": "53%vol牛栏山 1L",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 362,
+        "title": "国窖1573 2020年产 浓香型白酒 52度 500mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 363,
+        "title": "郎酒 青花郎酒 53度酱香型白酒 500ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 364,
+        "title": "君品习酒 53度 酱香型白酒 500ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 365,
+        "title": "2016年产 52度五粮液酒 500ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 366,
+        "title": "茅台 43%vol贵州茅台酒(酱香型白酒)  500mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 367,
+        "title": "国台国标 酱香型白酒 53度 750ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 368,
+        "title": "中粮 52度酒鬼酒 750ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 369,
+        "title": "习酒窖藏1998 酱香型白酒(大曲) 53度 750mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 371,
+        "title": "五粮液 1618 浓香型白酒  52度 500mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 372,
+        "title": "习酒 喜宴 53度 酱香型白酒 500ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 373,
+        "title": "五粮液(第七代) 52度 浓香型白酒 425ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 374,
+        "title": "五粮精酿 52度 浓香型白酒 500ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 375,
+        "title": "茅台 贵州茅台酒 酱香型白酒 53度 200ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 377,
+        "title": "五粮液 2021年产小五粮 浓香型白酒 52度 375mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 379,
+        "title": "习酒 星耀世纪 53度 酱香型白酒 500mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 380,
+        "title": "茅台 53度白酒 珍藏版 475mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 382,
+        "title": "55%vol西凤酒 1L",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 384,
+        "title": "赖茅 2024年 53度酱香型白酒 500mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 385,
+        "title": "汾酒 2021年 青花30 复兴版 清香型白酒 53度 500mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 386,
+        "title": "洋河 52度 海之蓝 1L",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 388,
+        "title": "茅台 2025年产 贵州茅台酒(精品) 酱香型白酒 53度 500mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 391,
+        "title": "水井坊 2024年臻酿八号 浓香型白酒 52度 500mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 392,
+        "title": "五粮金樽(藏品) 52度 浓香型白酒 500ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 393,
+        "title": "郎酒 2023年 红花郎 红十五 53度酱香型白酒 500mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 394,
+        "title": "茅台 53度白酒 百年金奖传奇 500mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 395,
+        "title": "牛栏山 52度二锅头 清香型白酒 500ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 396,
+        "title": "茅台 53度酱香型王子酒 500ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 397,
+        "title": "郎酒 红花郎 红十 53度酱香型白酒 750ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 398,
+        "title": "洋河 52度梦之蓝 750mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 399,
+        "title": "古井贡酒 年份原浆 (古7) 浓香型 50度 750mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 402,
+        "title": "汾酒 55%vol清香型白酒 950ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 403,
+        "title": "汾酒 老白汾酒10 清香型白酒 53度 1L",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 404,
+        "title": "剑南春 38度 浓香型白酒 500mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 405,
+        "title": "茅台王子酒(酱香型白酒) 53%vol 500ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 406,
+        "title": "汾酒 2017年 青花30 清香型白酒 53度 500mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 407,
+        "title": "习酒 2024年窖藏1988 酱香型白酒 53度 500mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 408,
+        "title": "习酒 53%vol习酒(圆习酒) 750ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 409,
+        "title": "国窖1573 2022年 浓香型白酒 38度 500ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 410,
+        "title": "贵州茅台酒 2025年产 酱香型白酒 53度 1L",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 411,
+        "title": "泸州老窖特曲酒 浓香型白酒 52度 750mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 412,
+        "title": "35°Vol劲酒 750ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 413,
+        "title": "剑南春 52度 经典版浓香型白酒 500ml",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 415,
+        "title": "五粮春 浓香型白酒 52度 1L",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 416,
+        "title": "五粮液 2020年八代浓香型白酒 500mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 417,
+        "title": "茅台1935 2023年茅台1935 酱香型白酒 53度 500mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 418,
+        "title": "汾酒沪上青花 清香型白酒 53度 500mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 419,
+        "title": "汾酒 青花20 清香型白酒 53度 500mL",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 421,
+        "title": "云茉葡萄907g",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 422,
+        "title": "爱朵拉无籽黑提 1.36kg",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 423,
+        "title": "新西兰进口 丹烁苹果 1.8kg",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 424,
+        "title": "鲜切奶油西瓜块 750g",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 425,
+        "title": "进口 Mini苹果 2.7kg",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 426,
+        "title": "鲜切一心甜蜜瓜块 750g",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 427,
+        "title": "佳沛金果果切310g",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 428,
+        "title": "澳洲无籽红提1.36kg/盒",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 429,
+        "title": "妮娜葡萄1.36kg",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 430,
+        "title": "奶油西瓜 4.5kg",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 431,
+        "title": "鲜切菠萝730g",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 432,
+        "title": "玫瑰香青提1.5kg",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 433,
+        "title": "MM 精选鲜鸡蛋 1.59kg(30枚)",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 434,
+        "title": "妃子笑荔枝 2.5kg",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 435,
+        "title": "都乐超甜蕉1.4kg",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 436,
+        "title": "鲜剥榴莲肉580g",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 437,
+        "title": "龙泉驿水蜜桃2.2kg",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 438,
+        "title": "带枝蓝莓 500g",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 439,
+        "title": "康沙板栗薯 1kg",
+        "reason": "uncomputable per100ml"
+      },
+      {
+        "index": 440,
+        "title": "乐淇苹果1.08kg",
+        "reason": "uncomputable per100ml"
+      }
+    ]
+  },
+  "tier2Evaluated": false,
+  "issues": [],
+  "tier2Note": "tier2 未评(无 key)"
+}

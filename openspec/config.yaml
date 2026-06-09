@@ -1,0 +1,40 @@
+schema: spec-driven
+
+# 项目上下文（创建工件时向 AI 显示）
+context: |
+  项目：单位价格比价系统（真实单价 / 规格归一化比价，先期聚焦山姆会员店饮料品类）。
+  完整架构蓝图是单一事实源：见 docs/architecture.md（创建任何工件前先读它）。需求源讨论见 qa.md。
+
+  技术栈：
+  - TypeScript 全栈 monorepo（pnpm workspace + project references）。
+  - packages/core：同构核心，纯函数无 IO（types/units/tier1 parser/calculator/comparability），客户端与服务端共用。
+  - packages/api-client：typed SDK。
+  - apps/api：Hono 后端（LLM 解析适配器 SpecParserLLM + tier3 校验计算 + Postgres/Drizzle + Redis 缓存）。
+  - apps/extension：WXT (MV3) 浏览器插件；apps/miniapp：Taro 小程序；apps/surge：Surge 模块（未来）。
+  - Zod 作为 schema 单一事实源（types 推导、API 校验、LLM 结构化输出、客户端校验共用一份）。
+
+  核心约定：
+  - 三段式解析：tier1 正则（core，双端）→ tier2 AI（仅服务端）→ tier3 确定性计算+校验（core）。AI 只理解、不计算；价格/换算/可比判断由确定性程序决定。
+  - 每个计算结论留痕公式，可回放解释。
+  - 数据走「按需计算 + 众包沉淀」，不做服务端主动全站爬取；合规风险分层管控（见架构文档第七节）。
+  - 不追求万物可比，明确标注不可比商品与原因。
+
+# 每个工件的规则
+rules:
+  proposal:
+    - 一个提案只聚焦单个 Phase 内的单个能力，不跨 Phase 混做。
+    - 必须包含「非目标」一节，明确划出本次不做的范围（如不做爬虫、不做复杂促销）。
+    - 标注涉及的 workspace 包/应用（packages/core、apps/api 等），以及是否触碰合规敏感面（抓取/众包）。
+  specs:
+    - 数据结构一律以 Zod schema 描述，types 从中推导；不要在 spec 里手写重复的 TS interface。
+    - 凡涉及单价计算的需求，必须写明确定性公式与留痕（formula）要求，以及一致性校验（total == unit*qty*multiplier）。
+    - 划清 tier 边界：tier1 正则与 tier3 计算属 packages/core（双端、纯函数无 IO）；tier2 AI 解析仅属 apps/api。
+    - AI 只负责结构化理解，禁止把价格/单位换算/可比判断写成由 LLM 决定。
+    - 不可比的商品需有 comparable=false 与 excludedReason 的明确处理。
+  tasks:
+    - 将任务分解为最多 2 小时的块。
+    - packages/core 的每个能力任务都要配套单测任务（含脏标题样本集）。
+    - 任务标注所属 workspace 路径；core 任务不得包含网络/DB/LLM 等 IO。
+  design:
+    - 仅在引入新依赖、跨包契约或不可逆决策时才写 design；简单变更跳过。
+    - 涉及合规的设计（抓取来源、众包上报）必须对照 docs/architecture.md 第七节的风险分层说明定位。
