@@ -5,6 +5,7 @@
 // the app builds even without OPENROUTER_API_KEY. A genuinely missing key only
 // surfaces as a distinguishable runtime config-error if a request reaches tier2.
 import type { RawProduct } from '@unit-price/core';
+import { createDb, createRepository, type Repository } from '@unit-price/db';
 import type { Bindings } from './bindings.js';
 import { ConfigError, loadLlmConfig } from './config.js';
 import { AiSdkSpecParser, type ParseOptions, type ParseResult, type SpecParserLLM } from './llm.js';
@@ -18,7 +19,14 @@ export {
   governanceMiddleware,
   type Governance,
 } from './governance.js';
-export { ParseRequestSchema, ParseResponseSchema } from './routes.js';
+export {
+  ParseRequestSchema,
+  ParseResponseSchema,
+  ContributeRequestSchema,
+  ContributeResponseSchema,
+  type ContributeRequest,
+  type ContributeResponse,
+} from './routes.js';
 export {
   orchestrate,
   type ParseResponse,
@@ -77,14 +85,26 @@ class LazySpecParser implements SpecParserLLM {
 export const defaultMakeLlm = (env: Bindings): SpecParserLLM => new LazySpecParser(env);
 
 /**
- * Build the production app with the real AI-SDK port and the REAL governance
- * implementation. The production Workers entry (`worker.ts`) uses this; it must
- * never be given the no-op governance (public-endpoint wide-open guardrail).
+ * The default Repository factory: builds a fresh repo from THIS request's
+ * injected `c.env.DB`, mirroring `makeLlm` (no isolate cross-request env bleed).
+ * Returns `null` when no D1 is bound so `/contribute` takes the persistence-error
+ * branch; `createDb`/`createRepository` throw on an invalid binding, which the
+ * route catches and maps to persistence-error.
+ */
+export const defaultMakeRepo = (env: Bindings): Repository | null =>
+  env.DB ? createRepository(createDb(env.DB)) : null;
+
+/**
+ * Build the production app with the real AI-SDK port, the REAL governance
+ * implementation, and the real D1-backed repository factory. The production
+ * Workers entry (`worker.ts`) uses this; it must never be given the no-op
+ * governance (public-endpoint wide-open guardrail).
  */
 export function buildApp() {
   return createApp({
     makeLlm: defaultMakeLlm,
     governance: createRealGovernance(),
+    makeRepo: defaultMakeRepo,
   });
 }
 

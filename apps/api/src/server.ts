@@ -25,6 +25,9 @@ const bindings: Bindings = {
   OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY,
 };
 
+// `makeRepo` is intentionally NOT injected here: local Node dev has no D1
+// binding, so `/contribute` takes the deterministic persistence-error branch
+// (distinct from the LLM config-error), while `/parse` keeps working keylessly.
 const app = createApp({
   makeLlm: defaultMakeLlm,
   governance: createNoopGovernance(),
