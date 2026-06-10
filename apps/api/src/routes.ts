@@ -14,7 +14,7 @@ import type { SpecParserLLM } from './llm.js';
 /** Request schema: title non-empty string, price a finite number, optional hint. */
 export const ParseRequestSchema = z.object({
   title: z.string().min(1, 'title must be a non-empty string'),
-  price: z.number({ invalid_type_error: 'price must be a number' }).finite('price must be a finite number'),
+  price: z.number({ error: 'price must be a number' }).finite('price must be a finite number'),
   categoryHint: z.string().optional(),
 });
 
