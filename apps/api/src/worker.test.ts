@@ -54,6 +54,18 @@ function fetchParse(env: Bindings, init: RequestInit) {
   return worker.fetch(req, env, ctx);
 }
 
+const contributeBody = JSON.stringify({
+  title: '可口可乐 330ml*24听',
+  price: 40,
+  store: 'sam',
+  storeSku: 'coke-24',
+});
+
+function fetchContribute(env: Bindings, init: RequestInit) {
+  const req = new Request('http://worker.test/contribute', init);
+  return worker.fetch(req, env, ctx);
+}
+
 describe('worker.ts production entry — real governance guardrail', () => {
   it('missing key -> 401 (real auth in force, not no-op)', async () => {
     const { kv } = makeFakeKV();
@@ -102,5 +114,18 @@ describe('worker.ts production entry — real governance guardrail', () => {
     expect(limited.status).toBe(429);
     expect((await limited.json()).error).toBe('rate-limited');
     expect(limited.headers.get('Retry-After')).not.toBeNull();
+  });
+
+  it('/contribute is guarded by real governance: missing key -> 401 (not wide-open)', async () => {
+    // The production entry must mount REAL governance on /contribute too. A
+    // no-op accidentally injected here would run the write path wide open and a
+    // keyless smoke would NOT 401 — this asserts the guardrail holds.
+    const { kv } = makeFakeKV();
+    const res = await fetchContribute(
+      { API_KEYS: VALID_KEY, GOVERNANCE_KV: kv },
+      { method: 'POST', headers: { 'content-type': 'application/json' }, body: contributeBody },
+    );
+    expect(res.status).toBe(401);
+    expect((await res.json()).error).toBe('auth-missing');
   });
 });

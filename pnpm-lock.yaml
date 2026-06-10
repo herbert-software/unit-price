@@ -32,6 +32,9 @@ importers:
       '@unit-price/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@unit-price/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       ai:
         specifier: ^6.0.199
         version: 6.0.199(zod@4.4.3)
@@ -45,9 +48,18 @@ importers:
       '@cloudflare/workers-types':
         specifier: ^4.20240909.0
         version: 4.20260610.1
+      '@types/better-sqlite3':
+        specifier: ^7.6.13
+        version: 7.6.13
       '@types/node':
         specifier: ^25.9.2
         version: 25.9.2
+      better-sqlite3:
+        specifier: ^12.10.0
+        version: 12.10.0
+      drizzle-orm:
+        specifier: ^0.45.2
+        version: 0.45.2(@cloudflare/workers-types@4.20260610.1)(@opentelemetry/api@1.9.0)(@types/better-sqlite3@7.6.13)(better-sqlite3@12.10.0)
 
   packages/core:
     dependencies:
