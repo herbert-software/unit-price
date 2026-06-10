@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { calculate } from './calculator.js';
 import { parseTier1 } from './parser.js';
 import type { RawProduct } from './types.js';
 import { ParsedSpecSchema } from './types.js';
@@ -187,5 +188,89 @@ describe('tier1 parser', () => {
     // trailing *6 wins; the leading 24 is not multiplied/stacked (NOT 144).
     expect(spec.quantity).toBe(6);
     expect(spec.totalAmount).toEqual({ value: 3000, unit: 'ml' });
+  });
+
+  // §total-restatement rebind (前导总量 + 单件×数量, self-consistency gate)
+
+  it('rebinds a self-consistent restated total to the per-unit size (多维刺梨柠檬饮 2.1L(100mL×21))', () => {
+    // 100mL×21=2100ml ≈ leading 2.1L=2100ml (0% error) -> rebind to 100ml/21.
+    // MUST NOT keep 2.1L as unitSize and multiply by 21 (=44.1L -> per100ml≈0.159).
+    const { spec } = parseTier1(raw('多维刺梨柠檬饮 2.1L(100mL×21)', 69.9));
+    expect(spec.unitSize).toEqual({ value: 100, unit: 'ml' });
+    expect(spec.quantity).toBe(21);
+    expect(spec.totalAmount).toEqual({ value: 2100, unit: 'ml' });
+    // calculator round-trip: 69.9 / 2100 * 100 ≈ 3.33 (NOT 0.159).
+    const { unitPrice } = calculate(spec, 69.9);
+    expect(unitPrice.per100ml).toBeCloseTo(3.33, 2);
+  });
+
+  it('rebinds when the rounding label is within tolerance (2L装可乐 330ml*6)', () => {
+    // leading 2L=2000ml vs 330ml×6=1980ml -> 1% error ≤ 10% -> rebind.
+    // The 2L装 product-name token is NOT taken as unitSize (would be 12L).
+    const { spec } = parseTier1(raw('2L装可乐 330ml*6', 12));
+    expect(spec.unitSize).toEqual({ value: 330, unit: 'ml' });
+    expect(spec.quantity).toBe(6);
+    expect(spec.totalAmount).toEqual({ value: 1980, unit: 'ml' });
+  });
+
+  it('does NOT rebind an inconsistent product-name size token (550mL便携装 1.5L*6)', () => {
+    // leading 550ml vs 1.5L×6=9000ml -> severe mismatch -> keep existing binding.
+    // 550mL is the real unit; 1.5L is marketing noise and must NOT become unitSize.
+    const { spec } = parseTier1(raw('550mL便携装 1.5L*6', 30));
+    expect(spec.unitSize).toEqual({ value: 550, unit: 'ml' });
+    expect(spec.quantity).toBe(6);
+  });
+
+  it('does NOT rebind a non-volume (weight) restatement (某蛋白粉 2kg(100g×20))', () => {
+    // toMl returns null for weight -> gate (a) fails -> no rebind; per100ml=null.
+    const { spec } = parseTier1(raw('某蛋白粉 2kg(100g×20)', 199));
+    expect(spec.unitSize).toEqual({ value: 2, unit: 'kg' });
+    const { unitPrice } = calculate(spec, 199);
+    expect(unitPrice.per100ml).toBeNull();
+  });
+
+  it('does NOT rebind when the leading size is weight even if the unit is volume (2kg礼盒 330ml*6)', () => {
+    // leading 2kg is non-volume -> gate (a) fails -> keep unitSize=2kg/quantity=6.
+    // Conservative: terminal per100ml=null (known non-goal, weight uncomputable).
+    const { spec } = parseTier1(raw('2kg礼盒 330ml*6', 88));
+    expect(spec.unitSize).toEqual({ value: 2, unit: 'kg' });
+    expect(spec.quantity).toBe(6);
+    const { unitPrice } = calculate(spec, 88);
+    expect(unitPrice.per100ml).toBeNull();
+  });
+
+  it('does NOT rebind and emits no NaN/Infinity when the leading total is zero (0L(100mL×21))', () => {
+    // This black-box test verifies the GATE DECISION (no rebind on a zero
+    // leading total) + output finiteness, NOT guard (b) in isolation: removing
+    // `leadingMl > 0` would yield `Infinity <= 0.1 === false`, i.e. the gate
+    // still fails and the assertions below are identical. "No transient
+    // division" is a short-circuit-ORDER property (guard (b) precedes the
+    // ratio), guaranteed by code review — not distinguishable here.
+    // Gate fails -> NO rebind: unitSize stays the first size (0L), quantity the
+    // QTY_RE value (21) — NOT rebound to 100ml/21.
+    const { spec } = parseTier1(raw('0L(100mL×21)', 10));
+    expect(spec.unitSize).toEqual({ value: 0, unit: 'L' });
+    expect(spec.quantity).toBe(21);
+    // per100ml must be null or finite — never NaN/Infinity.
+    const { unitPrice } = calculate(spec, 10);
+    if (unitPrice.per100ml !== null) {
+      expect(Number.isFinite(unitPrice.per100ml)).toBe(true);
+    }
+  });
+
+  it('ignores a middle size in a 3-size window, binding the rightmost (2.1L 礼盒1L 100mL×21)', () => {
+    // leading=first 2.1L, per-unit=rightmost 100mL, middle 1L ignored.
+    // 100×21=2100 ≈ 2100 -> self-consistent -> rebind.
+    const { spec } = parseTier1(raw('2.1L 礼盒1L 100mL×21', 69.9));
+    expect(spec.unitSize).toEqual({ value: 100, unit: 'ml' });
+    expect(spec.quantity).toBe(21);
+    expect(spec.totalAmount).toEqual({ value: 2100, unit: 'ml' });
+  });
+
+  it('does not enter the rebind for a single size multiplier (可口可乐 300mL*24)', () => {
+    const { spec } = parseTier1(raw('可口可乐 300mL*24', 50));
+    expect(spec.unitSize).toEqual({ value: 300, unit: 'ml' });
+    expect(spec.quantity).toBe(24);
+    expect(spec.totalAmount).toEqual({ value: 7200, unit: 'ml' });
   });
 });

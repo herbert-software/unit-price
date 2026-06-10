@@ -3,7 +3,7 @@
 // (full-spec hit) does not require the LLM; category is passed through from
 // categoryHint (default `beverage`) and never decided by the LLM.
 import type { Measurement, ParsedSpec, RawProduct } from './types.js';
-import { isVolumeUnit, normalizeMeasurement, normalizePackageUnit } from './units.js';
+import { isVolumeUnit, normalizeMeasurement, normalizePackageUnit, toMl } from './units.js';
 
 export interface Tier1Evidence {
   /** The substring(s) that matched, for traceability. */
@@ -44,6 +44,16 @@ const PACKAGE_TOKEN = '(听|罐|瓶|盒|袋)';
 
 // e.g. "330ml", "1.25L", "500克"
 const SIZE_RE = new RegExp(`(\\d+(?:\\.\\d+)?)\\s*${UNIT_TOKEN}`, 'i');
+
+// Global variant of SIZE_RE for scanning ALL size tokens in a window (used by
+// the total-restatement rebind). Built from the same source so the two never
+// drift. Note: this also matches weight tokens (2kg/100g); the rebind's volume
+// sub-check (gate (a)) filters those out.
+const SIZE_G = new RegExp(SIZE_RE.source, 'ig');
+
+// Self-consistency tolerance for the total-restatement rebind: relative error
+// (单件Vol×N vs 前导Vol, in ml) at or below this is treated as a restated total.
+const RESTATEMENT_TOLERANCE = 0.1;
 
 // quantity after a `*`/`×`/`x`, optionally followed by a package unit:
 // "*24听", "×6", "x 12 瓶"
@@ -115,6 +125,65 @@ export function parseTier1(input: RawProduct): Tier1Result {
     quantity = Number.parseInt(qtyMatch[1]!, 10);
     if (qtyMatch[2]) {
       packageUnit = normalizePackageUnit(qtyMatch[2]);
+    }
+  }
+
+  // Total-restatement rebind: a title like "2.1L(100mL×21)" carries a LEADING
+  // total ("2.1L") AND a per-unit×count restatement ("100mL×21"). QTY_RE finds
+  // the `×21` after the FIRST size and would otherwise bind it to that leading
+  // total, double-counting (44.1L). The `×N` actually multiplies the size
+  // immediately to its LEFT (100mL). So when the multiplier's left window holds
+  // ≥2 size tokens, the NEAREST (rightmost) size is the real unit, and the
+  // first size is the restated total — but ONLY when they self-consistently
+  // agree (nearest×N ≈ leading, both volume). Otherwise the leading size is
+  // most likely a product-name marketing token (2L装/便携550mL) and we keep the
+  // existing binding to avoid regressions.
+  if (qtyMatch && sizeMatch && quantity !== null) {
+    // Absolute position of the multiplier in `title`: qtyMatch.index is
+    // relative to qtySearch (= title.slice(sizeEnd)), so add sizeEnd back.
+    const mulAbs = sizeEnd + qtyMatch.index;
+    // Scan ALL size tokens in the window from title start to the multiplier;
+    // the rightmost is the per-unit candidate (nearestVol), the first is the
+    // leading-total candidate. Any size between them is ignored.
+    SIZE_G.lastIndex = 0;
+    const window = title.slice(0, mulAbs);
+    let nearestVol: Measurement | null = null;
+    let nearestIndex = -1;
+    for (const m of window.matchAll(SIZE_G)) {
+      const v = Number.parseFloat(m[1]!);
+      const measured = normalizeMeasurement(v, m[2]!);
+      if (measured) {
+        nearestVol = measured;
+        nearestIndex = m.index;
+      }
+    }
+    // Only consider rebinding when the nearest size is NOT the first size, i.e.
+    // there is an earlier leading size to treat as the restated total.
+    if (nearestVol !== null && nearestIndex > sizeMatch.index && unitSize !== null) {
+      const leadingVol = unitSize; // first size = leading-total candidate
+      const N = quantity;
+      // Self-consistency gate, short-circuited so the comparison (d) runs last
+      // and never divides by a non-positive/NaN leading-ml.
+      const bothVolume = isVolumeUnit(leadingVol.unit) && isVolumeUnit(nearestVol.unit);
+      const leadingMl = bothVolume ? toMl(leadingVol) : null;
+      const nearestMl = bothVolume ? toMl(nearestVol) : null;
+      if (
+        bothVolume &&
+        leadingMl !== null &&
+        leadingMl > 0 && // (b) divide-by-zero / non-positive guard
+        N > 0 && // (c)
+        nearestMl !== null &&
+        // (d) self-consistency: |nearest×N − leading| / leading ≤ tolerance
+        Math.abs(nearestMl * N - leadingMl) / leadingMl <= RESTATEMENT_TOLERANCE
+      ) {
+        // Gate passed: rebind to the per-unit size; the leading size was a
+        // restated total. totalAmount is re-derived below (unitSize×quantity).
+        matched.push(nearestVol.value + nearestVol.unit);
+        unitSize = nearestVol;
+        quantity = N;
+      }
+      // Gate failed (non-volume / non-positive leading / N≤0 / inconsistent):
+      // keep the existing binding; the leading size is product-name noise.
     }
   }
 

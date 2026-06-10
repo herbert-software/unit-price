@@ -1,3 +1,6 @@
 {"title":"农夫山泉 饮用天然水 550ml*24瓶 整箱","source":"manual","priceCents":3590,"samPkgNum":24,"samPkgUnit":"瓶","samUnitPrice":1.5}
 {"title":"可口可乐 汽水 330ml*6罐","source":"manual","priceCents":1380,"samPkgNum":6,"samPkgUnit":"罐","samUnitPrice":2.3,"isCompare":true}
 {"title":"伊利 纯牛奶 250ml*12盒 礼盒装","source":"manual","priceCents":4990,"samPkgNum":12,"samPkgUnit":"盒"}
+{"title":"多维刺梨柠檬饮 2.1L(100mL×21)","source":"manual","priceCents":6990,"expected":{"unitSize":100,"quantity":21,"totalAmount":2100,"per100ml":3.33}}
+{"title":"2L装可乐 330ml*6","source":"manual","priceCents":1980,"expected":{"unitSize":330,"quantity":6,"totalAmount":1980}}
+{"title":"550mL便携装 1.5L*6","source":"manual","expected":{"unitSize":550,"quantity":6}}
