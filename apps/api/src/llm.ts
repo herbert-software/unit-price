@@ -14,7 +14,7 @@
 import { LoadAPIKeyError, generateObject } from 'ai';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { ParsedSpecSchema, type ParsedSpec, type RawProduct } from '@unit-price/core';
-import { ConfigError, DEFAULT_MODEL, loadLlmConfig, type LlmConfig } from './config.js';
+import { ConfigError, DEFAULT_MODEL, type LlmConfig } from './config.js';
 
 /** Optional per-call options. The `tier` slot reserves the future upgrade path
  * (validation-fail -> retry with a stronger model). This change implements only
@@ -69,10 +69,10 @@ function classifyError(err: unknown): ParseResult {
 export class AiSdkSpecParser implements SpecParserLLM {
   private readonly config: LlmConfig;
 
-  constructor(config?: LlmConfig) {
-    // Resolving config here surfaces a missing key as ConfigError at construction
-    // time. Prefer startup fail-fast (see index.ts) so /parse never hits this.
-    this.config = config ?? loadLlmConfig();
+  constructor(config: LlmConfig) {
+    // Config is resolved by the caller from the injected request-time env
+    // (no global process.env fallback — Workers has none at module load).
+    this.config = config;
   }
 
   async parse(input: RawProduct, _opts?: ParseOptions): Promise<ParseResult> {

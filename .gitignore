@@ -14,3 +14,6 @@ packages/eval/corpus/*
 
 # local sqlite databases (drizzle-kit migrate targets, test fixtures)
 .local/
+
+# Wrangler local cache/state (Cloudflare Workers dev)
+.wrangler/
