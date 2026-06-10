@@ -5,7 +5,7 @@
 ## 需求
 ### 需求:受保护端点必须做 API key 鉴权
 
-`/parse` 必须要求合法 API key 方可访问。key 经约定请求头（`Authorization: Bearer <key>` 或 `X-API-Key`）传入。鉴权失败必须按下表返回**确定**的 HTTP 状态与 error code（不得二选一），错误体须含该 error code 说明原因，且**禁止**进入解析链路：
+受保护端点集合 `{/parse, /contribute}` 中的**每个**端点都必须要求合法 API key 方可访问。key 经约定请求头（`Authorization: Bearer <key>` 或 `X-API-Key`）传入。鉴权失败必须按下表返回**确定**的 HTTP 状态与 error code（不得二选一），错误体须含该 error code 说明原因，且**禁止**进入该端点的业务链路（`/parse` 的解析链路、`/contribute` 的「落 raw → orchestrate → 落 parse」流水均不得进入，亦**禁止**消耗 LLM 调用）：
 
 | 情形 | HTTP | error code |
 |---|---|---|
@@ -13,11 +13,15 @@
 | 携带了 key 但格式非法（空/非法字符/非 Bearer 形态） | `401` | `auth-malformed` |
 | key 格式合法但不在 allowlist（未登记/已吊销） | `403` | `auth-forbidden` |
 
-这三个 error code 必须与 `parse-api` 既有码（`invalid-request`/`config-error`/`insufficient-information`/`internal`）**两两不同**，使「鉴权失败」与「请求体不合法 4xx」「config/internal 错误 5xx」在 error code 层面**可区分、可断言**。`auth-missing` vs `auth-malformed` 的判定对**两种头来源统一**：完全无鉴权头 → `auth-missing`；头存在但取不出合法 key 值（`Authorization` 非 Bearer 形态如 `Basic …`、或 `Authorization: Bearer ` 空值、或 `X-API-Key` 为空串/含非法字符）→ `auth-malformed`。同时携带 `Authorization` 与 `X-API-Key` 时以 `Authorization: Bearer` 优先，且**严格优先不回退**——优先源存在但取值非法（如空 Bearer）时直接判 `auth-malformed`，**不**回退去读 `X-API-Key`（消除「优先源取值失败时是否回退次源」的歧义，使断言有唯一期望）。`/health` 必须**豁免整条治理链**（鉴权 + 限频 + 用量均不适用），供存活探测无 key 高频访问。
+这三个 error code 必须与 `parse-api`/`contribute-ingest` 既有码（`invalid-request`/`config-error`/`insufficient-information`/`internal`/`persistence-error`）**两两不同**，使「鉴权失败」与「请求体不合法 4xx」「config/persistence/internal 错误 5xx」在 error code 层面**可区分、可断言**。`auth-missing` vs `auth-malformed` 的判定对**两种头来源统一**：完全无鉴权头 → `auth-missing`；头存在但取不出合法 key 值（`Authorization` 非 Bearer 形态如 `Basic …`、或 `Authorization: Bearer ` 空值、或 `X-API-Key` 为空串/含非法字符）→ `auth-malformed`。同时携带 `Authorization` 与 `X-API-Key` 时以 `Authorization: Bearer` 优先，且**严格优先不回退**——优先源存在但取值非法（如空 Bearer）时直接判 `auth-malformed`，**不**回退去读 `X-API-Key`（消除「优先源取值失败时是否回退次源」的歧义，使断言有唯一期望）。鉴权语义对集合内两端点**完全一致**（同样的头解析、同样的三态判定）。`/health` 必须**豁免整条治理链**（鉴权 + 限频 + 用量均不适用），供存活探测无 key 高频访问。
 
 #### 场景:缺 key 时拒绝
 - **当** 客户端 POST `/parse` 未携带任何鉴权头
 - **那么** 必须返回 `401` + error code `auth-missing`，**禁止**进入 tier1/tier2/tier3，**禁止**消耗 LLM 调用
+
+#### 场景:/contribute 缺 key 时拒绝
+- **当** 客户端 POST `/contribute` 未携带任何鉴权头
+- **那么** 必须返回 `401` + error code `auth-missing`，**禁止**进入 ingest 流水（**禁止** `upsertRaw`、**禁止**消耗 LLM 调用）
 
 #### 场景:格式非法 key → 401 auth-malformed
 - **当** 客户端携带一个格式非法的 key（如空字符串、非 Bearer 形态）
@@ -28,8 +32,8 @@
 - **那么** 必须返回 `403` + error code `auth-forbidden`
 
 #### 场景:合法 key 放行
-- **当** 客户端携带 allowlist 内的 key POST 一个有效请求
-- **那么** 鉴权中间件必须放行，请求按 `parse-api` 既有语义处理，响应契约不变
+- **当** 客户端携带 allowlist 内的 key POST 一个有效请求（`/parse` 或 `/contribute`）
+- **那么** 鉴权中间件必须放行，请求按该端点既有语义处理，响应契约不变
 
 #### 场景:鉴权前置遮蔽 config-error
 - **当** 服务端缺 `OPENROUTER_API_KEY`、且客户端也未携带 API key 的请求到达 `/parse`
@@ -51,21 +55,29 @@
 
 ### 需求:治理中间件必须按固定顺序挂载
 
-治理三环必须按 **鉴权 → 限频 → 用量 → 业务处理** 的顺序挂载执行。限频判定必须在鉴权**之后**（未通过鉴权的请求**禁止**进入限频计数，以免未登记 key 打爆 `GOVERNANCE_KV` 计数槽）；用量计数必须在放行进入业务前记一次。顺序错置（如限频先于鉴权）必须视为缺陷。
+治理三环必须按 **鉴权 → 限频 → 用量 → 业务处理** 的顺序挂载执行，且对受保护端点集合 `{/parse, /contribute}` 中**每个**端点一致适用。限频判定必须在鉴权**之后**（未通过鉴权的请求**禁止**进入限频计数，以免未登记 key 打爆 `GOVERNANCE_KV` 计数槽）；用量计数必须在放行进入业务前记一次。中间件**必须先于该端点的业务 handler 注册**（在框架按注册顺序匹配中间件的运行时，handler 先于 `app.use` 注册会导致治理被绕过，视为缺陷）。顺序错置（如限频先于鉴权）必须视为缺陷。
 
 #### 场景:未鉴权请求不消耗限频计数
-- **当** 一个缺 key / 未登记 key 的请求到达
+- **当** 一个缺 key / 未登记 key 的请求到达（`/parse` 或 `/contribute`）
 - **那么** 必须在鉴权环即被 `401`/`403` 拦截，**禁止**进入限频环、**禁止**在 `GOVERNANCE_KV` 写任何该请求的计数
+
+#### 场景:/contribute 治理先于 ingest 流水
+- **当** 一个缺 key / 超限的请求 POST `/contribute`
+- **那么** 必须在治理环即被 `401`/`403`/`429` 拦截，**禁止**进入 ingest 流水——**禁止** `upsertRaw`（不得在治理拦截前落 raw）、**禁止**消耗 LLM 调用
 
 ### 需求:必须按 API key 限频
 
-服务必须对每个 API key 施加请求频率上限（固定窗口计数，计数状态存于 `GOVERNANCE_KV`，key 形如 `rl:<apiKey>:<windowStart>`、TTL=窗口长度）。超过上限的请求必须返回 `429` + error code `rate-limited`，并附 `Retry-After`，其值为**当前窗口的剩余秒数**（`windowStart + 窗口长度 − now`，向上取整；以窗口长度为上界），告知客户端最早可重试时刻；超限请求**禁止**进入解析链路、**禁止**消耗 LLM 调用。限频必须**按 key 隔离**（一个 key 超限不影响其他 key）。
+服务必须对每个 API key 施加请求频率上限（固定窗口计数，计数状态存于 `GOVERNANCE_KV`，key 形如 `rl:<apiKey>:<windowStart>`、TTL=窗口长度），对受保护端点集合 `{/parse, /contribute}` 一致适用。超过上限的请求必须返回 `429` + error code `rate-limited`，并附 `Retry-After`，其值为**当前窗口的剩余秒数**（`windowStart + 窗口长度 − now`，向上取整；以窗口长度为上界），告知客户端最早可重试时刻；超限请求**禁止**进入受保护端点的业务链路（`/parse` 解析链路 / `/contribute` 的 ingest 流水，即**禁止** `upsertRaw`）、**禁止**消耗 LLM 调用。限频必须**按 key 隔离**（一个 key 超限不影响其他 key）。
 
 `GOVERNANCE_KV` 不可用时，限频必须 **fail-open**（放行该请求并记录告警），**禁止** fail-closed（**禁止**因 KV 抖动把全部合法请求打成 `429`/`5xx`）——本治理定位为「防滥用」而非「精确配额/计费」，KV 故障期临时失去限频保护是可接受降级，与「用量写失败不降级 200」的 fail-open 取向一致。
 
 #### 场景:超限返回 429 且带重试提示
 - **当** 某 key 在计数窗口内的请求数超过配置上限
-- **那么** 后续请求必须返回 `429` + error code `rate-limited` + `Retry-After`，**禁止**进入解析链路或调用 LLM
+- **那么** 后续请求必须返回 `429` + error code `rate-limited` + `Retry-After`，**禁止**进入受保护端点的业务链路或调用 LLM
+
+#### 场景:/contribute 超限不落 raw
+- **当** 某 key 对 `/contribute` 的请求超过上限
+- **那么** 必须返回 `429`，且**禁止** `upsertRaw`（超限请求不得在限频前落 raw，否则限频形同虚设）
 
 #### 场景:限频按 key 隔离
 - **当** key A 已超限、key B 在限额内同时请求
@@ -81,13 +93,13 @@
 
 ### 需求:必须记录调用用量
 
-每次经鉴权放行的调用必须计入该 key 的用量，存于 `GOVERNANCE_KV`。计数粒度为**按 key 累计**（key 标识 + 单调累计计数 + 最近时间戳；如需按时间分桶统计可附加 `usage:<key>:<bucket>`，但累计计数是基线、必须可断言）。用量语义为**「放行（admission）计数」**——在鉴权+限频通过、进入业务**前**记一次，因此**包含**最终落 `500 config-error`/`503 insufficient`/`200` 的各类放行请求（统计的是「被准入处理的调用」，非「成功调用」），实现与断言都按此口径。用量记录**仅含调用元数据**，**禁止**记录商品标题/价格等业务数据（治理面不落业务数据，与架构 §7 的无状态计算定位一致）。用量统计的存储**禁止**阻塞或改变 `/parse` 的响应契约——计数失败只记告警、不得把一个本应 `200` 的结果变成错误。
+每次经鉴权放行的调用必须计入该 key 的用量，存于 `GOVERNANCE_KV`，对受保护端点集合 `{/parse, /contribute}` 一致适用。计数粒度为**按 key 累计**（key 标识 + 单调累计计数 + 最近时间戳；如需按时间分桶统计可附加 `usage:<key>:<bucket>`，但累计计数是基线、必须可断言）。用量语义为**「放行（admission）计数」**——在鉴权+限频通过、进入业务**前**记一次，因此**包含**最终落 `500 config-error`/`500 persistence-error`/`503 insufficient`/`200` 的各类放行请求（统计的是「被准入处理的调用」，非「成功调用」），实现与断言都按此口径。用量记录**仅含调用元数据**，**禁止**记录商品标题/价格等业务数据（治理面不落业务数据，与架构 §7 的无状态计算定位一致）。用量统计的存储**禁止**阻塞或改变受保护端点（`/parse`/`/contribute`）的响应契约——计数失败只记告警、不得把一个本应 `200` 的结果变成错误。
 
 #### 场景:放行调用计入用量
-- **当** 一个合法 key 的请求被放行处理
+- **当** 一个合法 key 的请求被放行处理（`/parse` 或 `/contribute`）
 - **那么** 该 key 的用量计数必须增加，记录只含 key/计数/时间元数据，**禁止**含 title/price 等业务字段
 
 #### 场景:用量写入失败不影响业务响应
 - **当** 用量计数的写入发生故障
-- **那么** `/parse` 仍必须按 `parse-api` 语义返回正确结果（计数失败只记录告警，**禁止**把 `200` 降级成 `5xx`）
+- **那么** 受保护端点仍必须按各自既有语义返回正确结果（`/parse` 按 parse-api、`/contribute` 按 contribute-ingest；计数失败只记录告警，**禁止**把 `200` 降级成 `5xx`）
 
