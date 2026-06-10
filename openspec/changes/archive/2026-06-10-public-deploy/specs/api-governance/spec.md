@@ -1,0 +1,97 @@
+# api-governance
+
+## 目的
+
+为公众开放的 `apps/api` 加上最低限度的访问治理：API key 鉴权、按 key 限频、用量计数。治理是既有路由的**前置中间件**，不改 `/parse` 的业务契约（请求/响应 schema、`200/4xx/5xx` 语义），只在其之前可能以 `401/403/429` 拦截。治理状态（限频计数、用量计数）存于 `GOVERNANCE_KV`（KV binding）；API key allowlist 来自 `API_KEYS`（secret，逗号分隔的合法 key 集合）。
+
+**受保护端点的状态码优先级（自上而下短路）**：① 鉴权 `401 auth-missing/auth-malformed` / `403 auth-forbidden` → ② 限频 `429 rate-limited` → ③ 业务（含 `400 invalid-request` 请求体校验、`200`、`500 config-error`、`503 insufficient-information`、`500 internal`）。因鉴权前置，缺客户端 key 的请求**先**得 `401`、`/parse` 的 `config-error`(500) 分支**根本不会被评估**——这是各来源状态码在同一请求上的确定先后，不存在两来源对同一请求竞争同一状态码。本节为待定占位，详见各需求。
+
+## 新增需求
+
+### 需求:受保护端点必须做 API key 鉴权
+
+`/parse` 必须要求合法 API key 方可访问。key 经约定请求头（`Authorization: Bearer <key>` 或 `X-API-Key`）传入。鉴权失败必须按下表返回**确定**的 HTTP 状态与 error code（不得二选一），错误体须含该 error code 说明原因，且**禁止**进入解析链路：
+
+| 情形 | HTTP | error code |
+|---|---|---|
+| 未携带 key（无鉴权头） | `401` | `auth-missing` |
+| 携带了 key 但格式非法（空/非法字符/非 Bearer 形态） | `401` | `auth-malformed` |
+| key 格式合法但不在 allowlist（未登记/已吊销） | `403` | `auth-forbidden` |
+
+这三个 error code 必须与 `parse-api` 既有码（`invalid-request`/`config-error`/`insufficient-information`/`internal`）**两两不同**，使「鉴权失败」与「请求体不合法 4xx」「config/internal 错误 5xx」在 error code 层面**可区分、可断言**。`auth-missing` vs `auth-malformed` 的判定对**两种头来源统一**：完全无鉴权头 → `auth-missing`；头存在但取不出合法 key 值（`Authorization` 非 Bearer 形态如 `Basic …`、或 `Authorization: Bearer ` 空值、或 `X-API-Key` 为空串/含非法字符）→ `auth-malformed`。同时携带 `Authorization` 与 `X-API-Key` 时以 `Authorization: Bearer` 优先，且**严格优先不回退**——优先源存在但取值非法（如空 Bearer）时直接判 `auth-malformed`，**不**回退去读 `X-API-Key`（消除「优先源取值失败时是否回退次源」的歧义，使断言有唯一期望）。`/health` 必须**豁免整条治理链**（鉴权 + 限频 + 用量均不适用），供存活探测无 key 高频访问。
+
+#### 场景:缺 key 时拒绝
+- **当** 客户端 POST `/parse` 未携带任何鉴权头
+- **那么** 必须返回 `401` + error code `auth-missing`，**禁止**进入 tier1/tier2/tier3，**禁止**消耗 LLM 调用
+
+#### 场景:格式非法 key → 401 auth-malformed
+- **当** 客户端携带一个格式非法的 key（如空字符串、非 Bearer 形态）
+- **那么** 必须返回 `401` + error code `auth-malformed`，与 `parse-api` 的 `invalid-request`(400) 可区分
+
+#### 场景:未登记 key → 403 auth-forbidden
+- **当** 客户端携带一个格式合法但不在 `API_KEYS` allowlist 内的 key（未登记/已吊销）
+- **那么** 必须返回 `403` + error code `auth-forbidden`
+
+#### 场景:合法 key 放行
+- **当** 客户端携带 allowlist 内的 key POST 一个有效请求
+- **那么** 鉴权中间件必须放行，请求按 `parse-api` 既有语义处理，响应契约不变
+
+#### 场景:鉴权前置遮蔽 config-error
+- **当** 服务端缺 `OPENROUTER_API_KEY`、且客户端也未携带 API key 的请求到达 `/parse`
+- **那么** 必须**先**在鉴权环返回 `401 auth-missing`，`config-error`(500) 分支不被评估——状态码先后由中间件顺序确定
+
+#### 场景:health 豁免整条治理链
+- **当** 探测器 GET `/health` 不带 key
+- **那么** 必须返回 `200`，不受鉴权/限频/用量任一环节拦截或计数
+
+### 需求:真实治理初始化必须校验 API_KEYS 配置
+
+生产注入的**真实**鉴权实现初始化时，若 `API_KEYS` secret 缺失/为空，必须 **fail-fast**（启动期）或对受保护端点返回明确的 `500 config-error`，**禁止**静默把 allowlist 当空集、从而把**所有**合法客户端 key 误判为 `403 auth-forbidden`（全量拒绝）。这是**配置错误**（与 `OPENROUTER_API_KEY` 缺失同类），与「`GOVERNANCE_KV` 故障 fail-open」是不同轴——allowlist 缺失是配置问题、不是运行期抖动，不得 fail-open 放行、也不得伪装成 `auth-forbidden`。
+
+注意区分两个 `config-error` 的来源与遮蔽关系：`API_KEYS`-config-error 在**鉴权环**（①）直接产生、**不被前置遮蔽**；而 `OPENROUTER_API_KEY`-config-error 在**业务环**（③）产生、会被鉴权前置遮蔽（缺客户端 key 先得 401）。两者同为 `500 config-error` 码、来源不同。
+
+#### 场景:生产缺 API_KEYS 时报配置错误而非全量 403
+- **当** 生产环境注入真实治理但 `API_KEYS` 未配置/为空
+- **那么** 必须 fail-fast 或返回 `500 config-error`，**禁止**把携带合法 key 的请求静默打成 `403 auth-forbidden`
+
+### 需求:治理中间件必须按固定顺序挂载
+
+治理三环必须按 **鉴权 → 限频 → 用量 → 业务处理** 的顺序挂载执行。限频判定必须在鉴权**之后**（未通过鉴权的请求**禁止**进入限频计数，以免未登记 key 打爆 `GOVERNANCE_KV` 计数槽）；用量计数必须在放行进入业务前记一次。顺序错置（如限频先于鉴权）必须视为缺陷。
+
+#### 场景:未鉴权请求不消耗限频计数
+- **当** 一个缺 key / 未登记 key 的请求到达
+- **那么** 必须在鉴权环即被 `401`/`403` 拦截，**禁止**进入限频环、**禁止**在 `GOVERNANCE_KV` 写任何该请求的计数
+
+### 需求:必须按 API key 限频
+
+服务必须对每个 API key 施加请求频率上限（固定窗口计数，计数状态存于 `GOVERNANCE_KV`，key 形如 `rl:<apiKey>:<windowStart>`、TTL=窗口长度）。超过上限的请求必须返回 `429` + error code `rate-limited`，并附 `Retry-After`，其值为**当前窗口的剩余秒数**（`windowStart + 窗口长度 − now`，向上取整；以窗口长度为上界），告知客户端最早可重试时刻；超限请求**禁止**进入解析链路、**禁止**消耗 LLM 调用。限频必须**按 key 隔离**（一个 key 超限不影响其他 key）。
+
+`GOVERNANCE_KV` 不可用时，限频必须 **fail-open**（放行该请求并记录告警），**禁止** fail-closed（**禁止**因 KV 抖动把全部合法请求打成 `429`/`5xx`）——本治理定位为「防滥用」而非「精确配额/计费」，KV 故障期临时失去限频保护是可接受降级，与「用量写失败不降级 200」的 fail-open 取向一致。
+
+#### 场景:超限返回 429 且带重试提示
+- **当** 某 key 在计数窗口内的请求数超过配置上限
+- **那么** 后续请求必须返回 `429` + error code `rate-limited` + `Retry-After`，**禁止**进入解析链路或调用 LLM
+
+#### 场景:限频按 key 隔离
+- **当** key A 已超限、key B 在限额内同时请求
+- **那么** key A 收 `429`，key B 必须正常放行处理——两者计数互不影响
+
+#### 场景:窗口恢复后放行
+- **当** 计数窗口过期、该 key 计数重置
+- **那么** 该 key 的后续合法请求必须恢复正常处理
+
+#### 场景:KV 不可用时 fail-open 放行
+- **当** 限频读/写 `GOVERNANCE_KV` 发生故障
+- **那么** 该请求必须被放行（继续走鉴权后的业务），并记录告警，**禁止**因 KV 故障返回 `429` 或 `5xx`
+
+### 需求:必须记录调用用量
+
+每次经鉴权放行的调用必须计入该 key 的用量，存于 `GOVERNANCE_KV`。计数粒度为**按 key 累计**（key 标识 + 单调累计计数 + 最近时间戳；如需按时间分桶统计可附加 `usage:<key>:<bucket>`，但累计计数是基线、必须可断言）。用量语义为**「放行（admission）计数」**——在鉴权+限频通过、进入业务**前**记一次，因此**包含**最终落 `500 config-error`/`503 insufficient`/`200` 的各类放行请求（统计的是「被准入处理的调用」，非「成功调用」），实现与断言都按此口径。用量记录**仅含调用元数据**，**禁止**记录商品标题/价格等业务数据（治理面不落业务数据，与架构 §7 的无状态计算定位一致）。用量统计的存储**禁止**阻塞或改变 `/parse` 的响应契约——计数失败只记告警、不得把一个本应 `200` 的结果变成错误。
+
+#### 场景:放行调用计入用量
+- **当** 一个合法 key 的请求被放行处理
+- **那么** 该 key 的用量计数必须增加，记录只含 key/计数/时间元数据，**禁止**含 title/price 等业务字段
+
+#### 场景:用量写入失败不影响业务响应
+- **当** 用量计数的写入发生故障
+- **那么** `/parse` 仍必须按 `parse-api` 语义返回正确结果（计数失败只记录告警，**禁止**把 `200` 降级成 `5xx`）

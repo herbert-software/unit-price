@@ -10,6 +10,8 @@ import { z } from 'zod';
 import { ParsedSpecSchema, UnitPriceSchema, WarningsSchema, type RawProduct } from '@unit-price/core';
 import { orchestrate } from './orchestrate.js';
 import type { SpecParserLLM } from './llm.js';
+import type { Bindings } from './bindings.js';
+import { governanceMiddleware, type Governance } from './governance.js';
 
 /** Request schema: title non-empty string, price a finite number, optional hint. */
 export const ParseRequestSchema = z.object({
@@ -27,13 +29,30 @@ export const ParseResponseSchema = z.object({
 });
 
 export interface AppDeps {
-  llm: SpecParserLLM;
+  /**
+   * Factory that builds an LLM port from the per-request injected env. Building
+   * per request (not a shared singleton) avoids isolate cross-request env
+   * bleed: each request resolves config from its OWN `c.env`.
+   */
+  makeLlm: (env: Bindings) => SpecParserLLM;
+  /**
+   * Injectable access governance (auth / rate-limit / usage). Production injects
+   * the real implementation; dev injects a pass-through no-op. Mounted as a
+   * pre-middleware on /parse only — /health is exempt from the entire chain.
+   */
+  governance: Governance;
 }
 
-export function createApp(deps: AppDeps): Hono {
-  const app = new Hono();
+export function createApp(deps: AppDeps): Hono<{ Bindings: Bindings }> {
+  const app = new Hono<{ Bindings: Bindings }>();
 
+  // /health is exempt from the entire governance chain (auth + rate + usage),
+  // so liveness probes can hit it keyless and high-frequency.
   app.get('/health', (c) => c.json({ ok: true }));
+
+  // Governance runs only on /parse, before the business handler. Order inside
+  // the middleware: auth → rate-limit → usage → next().
+  app.use('/parse', governanceMiddleware(deps.governance));
 
   app.post('/parse', async (c) => {
     let body: unknown;
@@ -56,7 +75,10 @@ export function createApp(deps: AppDeps): Hono {
     }
 
     const input: RawProduct = parsedReq.data;
-    const outcome = await orchestrate(input, deps.llm);
+    // Build the LLM port from THIS request's injected env (no cross-request
+    // bleed). The factory's lazy parser only resolves config if tier2 is reached.
+    const llm = deps.makeLlm(c.env);
+    const outcome = await orchestrate(input, llm);
 
     if (outcome.kind === 'config-error') {
       // Distinguishable 5xx: runtime configuration error (no confidence body).

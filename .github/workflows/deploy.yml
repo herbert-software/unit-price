@@ -1,0 +1,102 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Guard: no `drizzle-kit migrate` may target production/preview D1. Production
+  # migrations go exclusively through `wrangler d1 migrations apply`.
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: No prod drizzle-kit migrate
+        run: bash scripts/check-no-prod-drizzle-migrate.sh
+
+  # PR: build/test + dry-run deploy. Never touches production; runs no
+  # production migrations. wrangler dry-run needs no Cloudflare token, so this
+  # path works for fork PRs (which have no secret access).
+  deploy-preview:
+    if: github.event_name == 'pull_request'
+    needs: guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm -r build
+
+      - name: Test
+        run: pnpm -r test
+
+      # Dry-run validates the bundle/config without deploying. All wrangler
+      # invocations pass --config apps/api/wrangler.toml so migrations_dir's
+      # ../../ resolves to packages/db/drizzle from apps/api/.
+      - name: Wrangler deploy dry-run (preview)
+        uses: cloudflare/wrangler-action@v3
+        with:
+          command: deploy --dry-run --env preview --config apps/api/wrangler.toml
+
+  # main: build -> production D1 migrations apply -> deploy. Any step failing
+  # fails the job (no continue-on-error). Only CLOUDFLARE_API_TOKEN is injected;
+  # OPENROUTER_API_KEY / API_KEYS are Worker runtime secrets set out-of-band via
+  # `wrangler secret put`, never in CI.
+  deploy-production:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm -r build
+
+      # Tests must pass before any production migrate/deploy — a red build must
+      # never reach production (the verify workflow runs independently and does
+      # not gate this job).
+      - name: Test
+        run: pnpm -r test
+
+      # Apply migrations to production D1 BEFORE deploy so new code never runs
+      # ahead of its schema. migrations_dir is resolved from apps/api/ via
+      # --config; idempotency is enforced by wrangler's own d1_migrations table.
+      - name: Apply production D1 migrations
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          command: d1 migrations apply DB --env production --remote --config apps/api/wrangler.toml
+
+      - name: Deploy to production
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          command: deploy --env production --config apps/api/wrangler.toml

@@ -1,0 +1,61 @@
+# Cloudflare Workers config for @unit-price/api.
+#
+# Resource ids are placeholders: [手动验证] 由 task 4.1 开通后填入；禁明文密钥。
+# Secrets (OPENROUTER_API_KEY / API_KEYS) are NOT declared here — they are set
+# out-of-band via `wrangler secret put`, per environment. CLOUDFLARE_API_TOKEN
+# is a CI Actions secret. Nothing secret belongs in this file.
+#
+# Path baseline: wrangler resolves `migrations_dir` relative to THIS file's
+# directory (apps/api/). All wrangler invocations (local and CI) must pass
+# `--config apps/api/wrangler.toml` or run with apps/api/ as the working
+# directory — never rely on an incidentally-correct cwd.
+
+name = "unit-price-api"
+main = "src/worker.ts"
+compatibility_date = "2025-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Top-level bindings act as defaults for `wrangler dev`. Production / preview
+# split is defined under [env.*] below with their own resource ids.
+#
+# `migrations_dir` is a property of the D1 binding (NOT a top-level key — wrangler
+# rejects it there as an unexpected field and silently falls back to ./migrations).
+# drizzle-kit generates SQL into packages/db/drizzle/; wrangler applies the same
+# batch. Resolved relative to apps/api/, so value is ../../packages/db/drizzle.
+[[d1_databases]]
+binding = "DB"
+database_name = "unit-price-dev"
+database_id = "cdd2769b-8156-4dd5-9c63-5b557adffdf2"
+migrations_dir = "../../packages/db/drizzle"
+
+[[kv_namespaces]]
+binding = "GOVERNANCE_KV"
+id = "321e4dd69ec34147b48677ad7d9959b6"
+
+# --- production environment ---
+[env.production]
+name = "unit-price-api"
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "unit-price-prod"
+database_id = "96453a0a-369c-46d8-bb6b-8863ecae8507"
+migrations_dir = "../../packages/db/drizzle"
+
+[[env.production.kv_namespaces]]
+binding = "GOVERNANCE_KV"
+id = "2727860c3b7d4e80a0d9b789e37766e9"
+
+# --- preview environment ---
+[env.preview]
+name = "unit-price-api-preview"
+
+[[env.preview.d1_databases]]
+binding = "DB"
+database_name = "unit-price-preview"
+database_id = "acf56130-898a-48f1-ba5a-bf6487946a56"
+migrations_dir = "../../packages/db/drizzle"
+
+[[env.preview.kv_namespaces]]
+binding = "GOVERNANCE_KV"
+id = "1cbce68a7498470ab122a41866d15c33"

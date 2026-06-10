@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { RawProduct } from '@unit-price/core';
 import { createApp } from './routes.js';
+import { buildApp } from './index.js';
+import { createNoopGovernance } from './governance.js';
+import type { Bindings } from './bindings.js';
 import type { ParseOptions, ParseResult, SpecParserLLM } from './llm.js';
 
 // A port that must never be called (clean titles must skip tier2). Calling it
@@ -47,7 +50,9 @@ function fillingPort(fill: Partial<RawProduct> & Record<string, unknown>): SpecP
 }
 
 async function post(port: SpecParserLLM, body: unknown) {
-  const app = createApp({ llm: port });
+  // makeLlm ignores env here: each test injects a fixed port. Env-keyed
+  // construction is covered by the dedicated "env injection" suite below.
+  const app = createApp({ makeLlm: () => port, governance: createNoopGovernance() });
   const res = await app.request('/parse', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -240,6 +245,87 @@ describe('POST /parse — tier2 gap fill + merge semantics', () => {
     const { res, json } = await post(port, { title: '农夫山泉', price: 5 });
     expect(res.status).toBe(200);
     expect(json.unitPrice.per100ml).toBeNull();
+  });
+});
+
+describe('POST /parse — env injected per request (no isolate cross-request bleed)', () => {
+  // buildApp injects REAL governance, so these env-injection cases (which probe
+  // the parse-api tier behavior, not governance) must clear the auth gate: a
+  // valid API_KEYS allowlist + matching Bearer key admits the request, leaving
+  // OPENROUTER_API_KEY absent so the tier1/tier2 assertions stand unchanged.
+  const ADMIT_KEY = 'env-suite-key';
+
+  /** POST a body to an app, injecting `env` as the request-scoped Bindings. */
+  async function postEnv(app: ReturnType<typeof buildApp>, env: Bindings, body: unknown) {
+    const res = await app.request(
+      '/parse',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${ADMIT_KEY}` },
+        body: JSON.stringify(body),
+      },
+      { API_KEYS: ADMIT_KEY, ...env },
+    );
+    let json: any = null;
+    try {
+      json = await res.json();
+    } catch {
+      json = null;
+    }
+    return { res, json };
+  }
+
+  it('missing key + clean title -> 200 (tier1 only, tier2 never reached)', async () => {
+    // buildApp resolves LLM config from the INJECTED env; with no key a clean
+    // title must still parse via tier1 (tier2 skipped) -> 200.
+    const app = buildApp();
+    const { res, json } = await postEnv(app, {}, { title: '可口可乐 330ml*24听', price: 40 });
+    expect(res.status).toBe(200);
+    expect(json.unitPrice.per100ml).toBeCloseTo(0.505, 3);
+  });
+
+  it('missing key + dirty title needing tier2 -> 500 config-error (not 503)', async () => {
+    // A bare brand name has tier1 shape but needs tier2 to fill the spec. With
+    // no OPENROUTER_API_KEY injected, resolving config throws ConfigError ->
+    // orchestrate returns config-error -> HTTP 500 (distinct from 503).
+    const app = buildApp();
+    const { res, json } = await postEnv(app, {}, { title: '农夫山泉', price: 5 });
+    expect(res.status).toBe(500);
+    expect(json.error).toBe('config-error');
+  });
+
+  it('two requests with different env use their own env (no first-env固化)', async () => {
+    // Record the env each makeLlm call receives. The first request injects a
+    // key, the second injects none; if env were固化 from the first request the
+    // second would wrongly see the first key. We assert each saw its own env.
+    const seen: Array<Bindings> = [];
+    const app = createApp({
+      makeLlm: (env) => {
+        seen.push(env);
+        return {
+          async parse(): Promise<ParseResult> {
+            return { ok: false, kind: 'transport', message: 'noop' };
+          },
+        };
+      },
+      governance: createNoopGovernance(),
+    });
+
+    const dirty = { title: '农夫山泉', price: 5 };
+    await app.request(
+      '/parse',
+      { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(dirty) },
+      { OPENROUTER_API_KEY: 'key-A' },
+    );
+    await app.request(
+      '/parse',
+      { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(dirty) },
+      {},
+    );
+
+    expect(seen).toHaveLength(2);
+    expect(seen[0].OPENROUTER_API_KEY).toBe('key-A');
+    expect(seen[1].OPENROUTER_API_KEY).toBeUndefined();
   });
 });
 
