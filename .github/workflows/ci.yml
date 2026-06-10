@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # onlyBuiltDependencies (better-sqlite3, workerd) are pre-approved in
+      # package.json, so the native binaries build during install without prompts.
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm -r build
+
+      - name: Test
+        run: pnpm -r test
+
+      # Schema and generated migrations must stay in sync: regenerating must
+      # produce no diff. Catches a schema.ts change committed without its migration.
+      - name: Drizzle migration drift
+        run: |
+          pnpm --filter @unit-price/db generate
+          if [ -n "$(git status --porcelain packages/db/drizzle)" ]; then
+            echo "::error::Schema drift — run 'pnpm --filter @unit-price/db generate' and commit the migration."
+            git status --porcelain packages/db/drizzle
+            git --no-pager diff packages/db/drizzle
+            exit 1
+          fi

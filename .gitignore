@@ -11,3 +11,6 @@ dist/
 packages/eval/corpus/*
 !*.sample.jsonl
 !baseline.json
+
+# local sqlite databases (drizzle-kit migrate targets, test fixtures)
+.local/

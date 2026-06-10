@@ -33,10 +33,12 @@
 - [ ] 人工纠错入口
 
 ## Phase 3 — 中心商品库 + 众包榜单 + 小程序
-- [ ] Postgres + Drizzle 落库（product_raw / product_spec / unit_price / comparison_group / corrections）
+- [x] Cloudflare D1（SQLite）+ Drizzle 落库（product_raw / product / unit_price / corrections；comparison_group 改动态查询、不建表）
 - [ ] `POST /contribute`、`GET /rankings`、`POST /corrections`
 - [ ] 公众 API 治理（API key + 限频 + 用量统计）
 - [ ] `apps/miniapp`（Taro）：榜单浏览 + 手动/扫码录入
+
+> 落库部分由 OpenSpec change `add-database` 交付：`packages/db`（`@unit-price/db`）—— Cloudflare D1（SQLite）+ Drizzle，schema 用 SQLite↔Postgres 可移植类型；表为 product_raw / product / unit_price / corrections（comparison_group 不物化，对比组改动态查询）；HTTP ingest / 部署归 `public-deploy`，品类标签归 `category-tagging`。
 
 ## Phase 4 — 多商店 + Surge 模块 + 复杂品类
 - [ ] StorePlugin 扩展：Costco / 盒马 / 京东

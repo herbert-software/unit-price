@@ -35,7 +35,7 @@
    浏览器插件     小程序(Taro)     Surge 模块(未来)    apps/api (Hono)
    DOM 抽取      榜单+录入         MITM 抽取           ├ LLM 解析层(tier2)
    →浮层         →榜单/对比        →算单价/通知        ├ 校验层(tier3)
-        └───────────┴─────────────────┴──────── HTTP ────┤ DB(Postgres/Drizzle)
+        └───────────┴─────────────────┴──────── HTTP ────┤ DB(D1/SQLite·Drizzle)
                        公众 API + api-client SDK          └ Cache(Redis)
 ```
 
@@ -93,7 +93,7 @@ unit-price/
   - `GET /rankings` — 按品类/品牌/比价组取榜单（小程序主消费）
   - `POST /corrections` — 人工纠错（`parse_source=manual_corrected`，沉淀 few-shot 样本）
 - **公众 API 治理**：API key + 限频 + 用量统计。
-- **DB**：PostgreSQL + Drizzle ORM。表：`product_raw / product_spec / unit_price / comparison_group / corrections`。
+- **DB**：Cloudflare D1（SQLite）+ Drizzle ORM（CF 优先；schema 用 SQLite↔Postgres 可移植类型，撑爆 D1 时可平滑迁 Postgres）。表：`product_raw / product / unit_price / corrections`。（`product` 即规范商品表，承载商品身份而非仅 spec；`comparison_group` 不物化——对比组按 `docs/taxonomy-and-tagging.md` §九 改动态查询。品类 `tag` 系列表见该文档，由后续变更引入。）
 
 ---
 
@@ -127,7 +127,7 @@ unit-price/
 - **Phase 2 — 山姆商品页插件**
   WXT 插件 + 山姆 StorePlugin + 浮层 + 人工纠错；只做饮料、不做全站爬、不做复杂促销。
 - **Phase 3 — 中心商品库 + 众包榜单 + 小程序**
-  Postgres 落库 + `/contribute` `/rankings` `/corrections`；Taro 小程序上线榜单浏览 + 录入。
+  D1（SQLite）落库 + `/contribute` `/rankings` `/corrections`；Taro 小程序上线榜单浏览 + 录入。
 - **Phase 4 — 多商店 + Surge 模块 + 复杂品类**
   StorePlugin 扩 Costco/盒马/京东；apps/surge MITM；CategoryPlugin 扩纸品/洗护/肉类/宠物食品；引入促销分层（直接价/件数促销/满减均摊 + confidence）。
 
