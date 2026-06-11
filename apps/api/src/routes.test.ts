@@ -171,13 +171,16 @@ describe('POST /parse — price <= 0 -> 200 + null + warning', () => {
     expect(json.warnings).not.toContain('未经 LLM 复核');
   });
 
-  it('weight unitSize (2kg) with price>0 is determinate null and skips tier2', async () => {
-    // tier1 extracts a non-volume unit (2kg). The LLM cannot make a weight a
-    // volume, so this is a CERTAIN null -> 200; tier2 (a failing port) must not
-    // be reached, and no "未经 LLM 复核" warning is attached.
+  it('weight unitSize (2kg) computes per100g on the weight axis and skips tier2', async () => {
+    // tier1 extracts a clean weight single unit (2kg, qty inferred = 1). This is
+    // a DETERMINATE weight-axis verdict — per100g = 40/2000*100 = 2.0, per100ml
+    // null — so tier2 (a failing port) must not be reached, and no "未经 LLM 复核"
+    // warning is attached. The single-unit inference warning is surfaced.
     const { res, json } = await post(transportFailPort, { title: '鸡胸肉 2kg', price: 40 });
     expect(res.status).toBe(200);
     expect(json.unitPrice.per100ml).toBeNull();
+    expect(json.unitPrice.per100g).toBeCloseTo(2.0, 6);
+    expect(json.unitPrice.formula).not.toBeNull();
     expect(json.warnings.length).toBeGreaterThan(0);
     expect(json.warnings).not.toContain('未经 LLM 复核');
   });
@@ -205,10 +208,41 @@ describe('POST /parse — tier2 transport failure', () => {
     expect(json.warnings).not.toContain('未经 LLM 复核');
   });
 
-  it('weight unitSize (2kg) is determined-uncomputable -> 200 + null, not 5xx', async () => {
+  it('weight unitSize (2kg) is a determinate weight-axis verdict -> 200 + per100g, not 5xx', async () => {
+    // tier1 has a weight shape, so even with tier2 transport-failing the verdict
+    // is determinate (per100g = 30/2000*100 = 1.5) -> 200, never 5xx.
     const { res, json } = await post(transportFailPort, { title: '大米 2kg', price: 30 });
     expect(res.status).toBe(200);
     expect(json.unitPrice.per100ml).toBeNull();
+    expect(json.unitPrice.per100g).toBeCloseTo(1.5, 6);
+  });
+
+  it('weight unitSize (2kg, price 45) -> 200, per100g = 2.25, per100ml null (spec scenario)', async () => {
+    // parse-api spec scenario: tier1 extracts unitSize=2kg (single unit, qty=1,
+    // totalAmount=2kg). Weight axis computes per100g = 45/2000*100 = 2.25; the
+    // volume axis is null. Determinate at tier1 -> tier2 skipped.
+    const { res, json } = await post(transportFailPort, { title: '水蜜黄桃 2kg', price: 45 });
+    expect(res.status).toBe(200);
+    expect(json.unitPrice.per100g).toBeCloseTo(2.25, 6);
+    expect(json.unitPrice.per100ml).toBeNull();
+    expect(json.unitPrice.formula).not.toBeNull();
+    expect(json.warnings).not.toContain('未经 LLM 复核');
+  });
+
+  it('egg 1.59kg(30枚): free piece-count suppresses inference -> 200, both axes null, not 5xx', async () => {
+    // parse-api spec scenario: tier1 extracts unitSize=1.59kg but the free piece
+    // count "30" (枚 ∉ package-unit set) suppresses the single-unit inference, so
+    // quantity stays null and no total is derivable -> a CERTAIN null on BOTH
+    // axes. tier1 has a weight shape -> determinate -> 200 (not 5xx), even with
+    // tier2 transport-failing.
+    const { res, json } = await post(transportFailPort, {
+      title: 'MM 精选鲜鸡蛋 1.59kg(30枚)',
+      price: 30,
+    });
+    expect(res.status).toBe(200);
+    expect(json.unitPrice.per100ml).toBeNull();
+    expect(json.unitPrice.per100g).toBeNull();
+    expect(json.unitPrice.formula).toBeNull();
     expect(json.warnings.length).toBeGreaterThan(0);
   });
 });

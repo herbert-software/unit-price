@@ -3,7 +3,13 @@
 // (full-spec hit) does not require the LLM; category is passed through from
 // categoryHint (default `beverage`) and never decided by the LLM.
 import type { Measurement, ParsedSpec, RawProduct } from './types.js';
-import { isVolumeUnit, normalizeMeasurement, normalizePackageUnit, toMl } from './units.js';
+import {
+  isVolumeUnit,
+  isWeightUnit,
+  normalizeMeasurement,
+  normalizePackageUnit,
+  toMl,
+} from './units.js';
 
 export interface Tier1Evidence {
   /** The substring(s) that matched, for traceability. */
@@ -221,15 +227,17 @@ export function parseTier1(input: RawProduct): Tier1Result {
     }
   }
 
-  // Single-unit inference: a volume size with NO other digit-bearing quantity
-  // signal in the rest of the title (no `*×x`, no `数字+包装单位`, no free
-  // digit) is treated as a single unit (quantity=1). A multiplier in play that
-  // resolved to quantity<=0 (e.g. "330ml*0") is NOT inferred — the multiplier
-  // is itself a signal — and falls through to the downstream zero-total state.
+  // Single-unit inference: a volume OR weight size with NO other digit-bearing
+  // quantity signal in the rest of the title (no `*×x`, no `数字+包装单位`, no
+  // free digit) is treated as a single unit (quantity=1). A multiplier in play
+  // that resolved to quantity<=0 (e.g. "330ml*0") is NOT inferred — the
+  // multiplier is itself a signal — and falls through to the downstream
+  // zero-total state. Volume behavior is unchanged; weight is the symmetric
+  // extension (judging criterion identical, only the size unit set differs).
   if (
     quantity === null &&
     unitSize !== null &&
-    isVolumeUnit(unitSize.unit)
+    (isVolumeUnit(unitSize.unit) || isWeightUnit(unitSize.unit))
   ) {
     const rest = title.slice(0, sizeMatch!.index) + title.slice(sizeEnd);
     if (!hasQuantitySignal(rest)) {
@@ -239,11 +247,15 @@ export function parseTier1(input: RawProduct): Tier1Result {
   }
 
   // Derive totalAmount when unitSize + quantity are both known and unitSize is
-  // a volume unit (ml/L). Keep the derived total in the unitSize's own unit —
-  // parsing never crosses the ml<->L boundary (calc converts later). For a
-  // single inferred unit, totalAmount === unitSize.
+  // on an axis (volume ml/L OR weight g/kg). Keep the derived total in the
+  // unitSize's own unit — parsing never crosses the ml<->L or g<->kg boundary
+  // (calc converts later). For a single inferred unit, totalAmount === unitSize.
   let totalAmount: Measurement | null = null;
-  if (unitSize && quantity !== null && isVolumeUnit(unitSize.unit)) {
+  if (
+    unitSize &&
+    quantity !== null &&
+    (isVolumeUnit(unitSize.unit) || isWeightUnit(unitSize.unit))
+  ) {
     totalAmount = { value: unitSize.value * quantity, unit: unitSize.unit };
   }
 

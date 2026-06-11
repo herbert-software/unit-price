@@ -1,6 +1,17 @@
 // Spec consistency check (tolerance + missing-field third state). Pure, no IO.
-import type { ParsedSpec } from './types.js';
-import { toMl } from './units.js';
+import type { Measurement, ParsedSpec } from './types.js';
+import { isVolumeUnit, isWeightUnit, toGrams, toMl } from './units.js';
+
+/**
+ * Convert a measurement to its axis base unit (volume -> ml, weight -> g), or
+ * null if the unit is on neither axis. Used so consistency compares both sides
+ * within the same axis.
+ */
+function toAxisBase(m: Measurement): number | null {
+  if (isVolumeUnit(m.unit)) return toMl(m);
+  if (isWeightUnit(m.unit)) return toGrams(m);
+  return null;
+}
 
 export type ConsistencyResult =
   | { kind: 'consistent' } // unitSize & quantity present, equation holds
@@ -17,11 +28,12 @@ export function multiplierOf(spec: ParsedSpec): number {
 
 /**
  * When both unitSize and quantity are present, verify the total is self-
- * consistent: abs(totalMl - unitSizeMl*quantity*multiplier)
- *   <= 1e-6 * max(totalMl, unitSizeMl*quantity*multiplier).
- * Missing unitSize/quantity -> 'skipped' (a third state, distinct from
- * 'inconsistent'). If totalAmount is absent, there is nothing to compare
- * against, so it is also 'skipped'.
+ * consistent within the product's axis: abs(totalBase - unitSizeBase*quantity*
+ * multiplier) <= 1e-6 * max(...), where base is ml (volume axis) or g (weight
+ * axis). This is axis-agnostic — a weight full-spec self-consistent product is
+ * judged 'consistent' just like a volume one. Missing unitSize/quantity ->
+ * 'skipped' (a third state, distinct from 'inconsistent'). If totalAmount is
+ * absent, or unitSize/totalAmount are cross-axis, it is also 'skipped'.
  */
 export function checkConsistency(spec: ParsedSpec): ConsistencyResult {
   const { unitSize, quantity, totalAmount } = spec;
@@ -38,17 +50,25 @@ export function checkConsistency(spec: ParsedSpec): ConsistencyResult {
     return { kind: 'skipped' };
   }
 
-  const unitSizeMl = toMl(unitSize);
-  const totalMl = toMl(totalAmount);
-  // Non-volume units cannot be compared in ml space; defer to the
-  // uncomputable terminal state rather than asserting (in)consistency here.
-  if (unitSizeMl === null || totalMl === null) {
+  // Convert both sides to their axis base (volume -> ml, weight -> g). Units on
+  // neither axis, or a cross-axis pairing (unitSize volume vs totalAmount
+  // weight, or vice versa), cannot form a same-axis equation; defer to the
+  // 'skipped' third state rather than asserting (in)consistency here.
+  const sameAxis =
+    (isVolumeUnit(unitSize.unit) && isVolumeUnit(totalAmount.unit)) ||
+    (isWeightUnit(unitSize.unit) && isWeightUnit(totalAmount.unit));
+  if (!sameAxis) {
+    return { kind: 'skipped' };
+  }
+  const unitSizeBase = toAxisBase(unitSize);
+  const totalBase = toAxisBase(totalAmount);
+  if (unitSizeBase === null || totalBase === null) {
     return { kind: 'skipped' };
   }
 
-  const expected = unitSizeMl * quantity * multiplierOf(spec);
-  const diff = Math.abs(totalMl - expected);
-  const basis = Math.max(totalMl, expected);
+  const expected = unitSizeBase * quantity * multiplierOf(spec);
+  const diff = Math.abs(totalBase - expected);
+  const basis = Math.max(totalBase, expected);
   if (diff <= REL_TOL * basis) {
     return { kind: 'consistent' };
   }

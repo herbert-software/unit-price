@@ -15,6 +15,13 @@
       "when": 1781116679204,
       "tag": "0001_fast_mephisto",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1781168559893,
+      "tag": "0002_natural_jubilee",
+      "breakpoints": true
     }
   ]
 }

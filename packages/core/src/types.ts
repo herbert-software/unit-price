@@ -38,9 +38,14 @@ export const ParsedSpecSchema = z.object({
 });
 export type ParsedSpec = z.infer<typeof ParsedSpecSchema>;
 
-/** Unit price result. `per100ml` and `formula` are explicitly nullable. */
+/**
+ * Unit price result. The product falls on exactly one axis: `per100ml` (volume)
+ * XOR `per100g` (weight); at most one is non-null (both null = uncomputable).
+ * `per100ml`, `per100g` and `formula` are explicitly nullable.
+ */
 export const UnitPriceSchema = z.object({
   per100ml: z.number().nullable(),
+  per100g: z.number().nullable(),
   formula: z.string().nullable(),
 });
 export type UnitPrice = z.infer<typeof UnitPriceSchema>;

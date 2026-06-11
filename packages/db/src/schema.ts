@@ -93,10 +93,12 @@ export const product = sqliteTable(
 
 /**
  * Calculator output (`CalcResult`, not just `UnitPrice`) for a product.
- * `per100ml`/`formula` come straight from core (never recomputed from the
- * stored integer-cents price); `formula` embeds yuan amounts and is
- * self-contained for replay. "Definitely not computable" is expressed as
- * `per100ml = NULL` (never 0 or a missing row).
+ * `per100ml`/`per100g`/`formula` come straight from core (never recomputed
+ * from the stored integer-cents price); `formula` embeds yuan amounts and is
+ * self-contained for replay. A product falls on exactly one axis: `per100ml`
+ * (volume) XOR `per100g` (weight) — at most one is non-null. "Definitely not
+ * computable" is expressed as `per100ml = per100g = NULL` (never 0 or a
+ * missing row).
  */
 export const unitPrice = sqliteTable(
   'unit_price',
@@ -106,6 +108,7 @@ export const unitPrice = sqliteTable(
       .notNull()
       .references(() => product.id),
     per100ml: real('per100ml'),
+    per100g: real('per100g'),
     formula: text('formula'),
     /** CalcResult.confidence — the single authoritative confidence band. */
     confidence: real('confidence').notNull(),
@@ -115,6 +118,8 @@ export const unitPrice = sqliteTable(
   (t) => [
     // Numeric (REAL) ordering index for future per-100ml rankings.
     index('unit_price_per100ml_idx').on(t.per100ml),
+    // Symmetric numeric (REAL) ordering index for per-100g rankings.
+    index('unit_price_per100g_idx').on(t.per100g),
     // One unit_price row per product (saveParsed writes them 1:1).
     uniqueIndex('unit_price_product_id_unique').on(t.productId),
   ],

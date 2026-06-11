@@ -9,8 +9,8 @@
 //    string "n/a"), never 0 / NaN, and an `n/a` metric is excluded from
 //    regression comparison.
 //  - per100ml has NO external truth → it is NOT subject to an accuracy assertion;
-//    "computability rate" (tier3 producing a non-null per100ml) is the metric we
-//    consume from tier3.
+//    "computability rate" (tier3 producing a non-null per100ml or per100g) is the
+//    metric we consume from tier3.
 //  - No key → tier1-only is evaluated; the report flags "tier2 未评(无 key)" and
 //    the harness must not error out. tier2 is reached via a dynamic import of
 //    `@unit-price/api` so apps/api is never a resident dependency; if it cannot
@@ -61,7 +61,7 @@ export interface LaneMetrics {
   };
   /**
    * Computability rate: fraction of samples (with a usable price) for which
-   * tier3 produced a non-null per100ml. Consumes the tier3 conclusion.
+   * tier3 produced a non-null per100ml or per100g. Consumes the tier3 conclusion.
    */
   computability: MetricValue;
   /**
@@ -105,6 +105,8 @@ interface ScoredSample {
   quantity: number | null;
   /** tier3 per100ml (null when uncomputable). */
   per100ml: number | null;
+  /** tier3 per100g (null when uncomputable / not weight axis). */
+  per100g: number | null;
   /** whether the sample carried a usable (>0) price at all. */
   hasUsablePrice: boolean;
 }
@@ -155,10 +157,10 @@ function computeLaneMetrics(
 
     if (s.hasUsablePrice) {
       priceEligible++;
-      if (s.per100ml !== null) {
+      if (s.per100ml !== null || s.per100g !== null) {
         computable++;
       } else {
-        failures.push({ index, title: sample.title, reason: 'uncomputable per100ml' });
+        failures.push({ index, title: sample.title, reason: 'uncomputable (no per100ml/per100g)' });
       }
     }
 
@@ -223,6 +225,7 @@ function scoreTier1(sample: CorpusSample): ScoredSample {
     hitTotalAmount: t1.evidence.hits.totalAmount,
     quantity: t1.spec.quantity ?? null,
     per100ml: calc.unitPrice.per100ml,
+    per100g: calc.unitPrice.per100g,
     hasUsablePrice: input.price > 0,
   };
 }
@@ -262,7 +265,10 @@ async function defaultLoadTier2(apiKey: string): Promise<Tier2Scorer | null> {
         llm: unknown,
       ) => Promise<{
         kind: string;
-        response?: { spec: { quantity?: number | null }; unitPrice: { per100ml: number | null } };
+        response?: {
+          spec: { quantity?: number | null };
+          unitPrice: { per100ml: number | null; per100g?: number | null };
+        };
       }>;
       loadLlmConfig?: () => unknown;
     };
@@ -277,9 +283,11 @@ async function defaultLoadTier2(apiKey: string): Promise<Tier2Scorer | null> {
       const t1 = parseTier1(input);
       const outcome = await orchestrate(input, llm);
       let per100ml: number | null = null;
+      let per100g: number | null = null;
       let quantity: number | null = t1.spec.quantity ?? null;
       if (outcome.kind === 'ok' && outcome.response) {
         per100ml = outcome.response.unitPrice.per100ml ?? null;
+        per100g = outcome.response.unitPrice.per100g ?? null;
         quantity = outcome.response.spec.quantity ?? quantity;
       }
       return {
@@ -288,6 +296,7 @@ async function defaultLoadTier2(apiKey: string): Promise<Tier2Scorer | null> {
         hitTotalAmount: t1.evidence.hits.totalAmount,
         quantity,
         per100ml,
+        per100g,
         hasUsablePrice: input.price > 0,
       };
     };

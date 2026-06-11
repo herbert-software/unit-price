@@ -26,6 +26,20 @@ const fullSpec: ParsedSpec = ParsedSpecSchema.parse({
 /** Real core output for the full spec at ¥39.9 (per100ml = 0.665). */
 const fullCalc: CalcResult = calculate(fullSpec, 39.9);
 
+/** Consistent weight spec: a single 2kg item (per100g axis). */
+const weightSpec: ParsedSpec = ParsedSpecSchema.parse({
+  unitSize: { value: 2, unit: 'kg' },
+  quantity: 1,
+  multipliers: [1],
+  totalAmount: { value: 2, unit: 'kg' },
+  packageUnit: null,
+  category: 'beverage',
+  confidence: 0.9,
+});
+
+/** Real core output for the weight spec at ¥45 (per100g = 2.25, per100ml NULL). */
+const weightCalc: CalcResult = calculate(weightSpec, 45);
+
 function rawInput(overrides: Record<string, unknown> = {}) {
   return {
     store: 'sam',
@@ -389,6 +403,99 @@ describe('saveParsed + getProduct', () => {
     expect(record!.calc.unitPrice.per100ml).toBeNull();
   });
 
+  it('stores a weight-axis result as per100g non-null / per100ml NULL', async () => {
+    expect(weightCalc.unitPrice.per100g).toBe(2.25);
+    expect(weightCalc.unitPrice.per100ml).toBeNull();
+    const { productId } = await t.repo.saveParsed({
+      rawId,
+      spec: weightSpec,
+      calc: weightCalc,
+    });
+    const row = t.handle
+      .prepare(
+        'SELECT per100ml, per100g, formula FROM unit_price WHERE product_id = ?',
+      )
+      .get(productId) as {
+      per100ml: unknown;
+      per100g: number;
+      formula: string;
+    };
+    expect(row.per100ml).toBeNull();
+    expect(row.per100g).toBe(weightCalc.unitPrice.per100g);
+    expect(row.formula).toBe(weightCalc.unitPrice.formula);
+
+    const record = await t.repo.getProduct(productId);
+    expect(record!.calc).toEqual(weightCalc);
+    expect(record!.calc.unitPrice.per100ml).toBeNull();
+    expect(record!.calc.unitPrice.per100g).toBe(2.25);
+  });
+
+  it('stores a volume-axis result as per100ml non-null / per100g NULL', async () => {
+    expect(fullCalc.unitPrice.per100g).toBeNull();
+    const { productId } = await t.repo.saveParsed({
+      rawId,
+      spec: fullSpec,
+      calc: fullCalc,
+    });
+    const row = t.handle
+      .prepare('SELECT per100ml, per100g FROM unit_price WHERE product_id = ?')
+      .get(productId) as { per100ml: number; per100g: unknown };
+    expect(row.per100ml).toBe(fullCalc.unitPrice.per100ml);
+    expect(row.per100g).toBeNull();
+  });
+
+  it('stores "definitely uncomputable" with both per100ml and per100g NULL', async () => {
+    const uncomputable = calculate(fullSpec, -1);
+    expect(uncomputable.unitPrice.per100ml).toBeNull();
+    expect(uncomputable.unitPrice.per100g).toBeNull();
+    const { productId } = await t.repo.saveParsed({
+      rawId,
+      spec: fullSpec,
+      calc: uncomputable,
+    });
+    const row = t.handle
+      .prepare('SELECT per100ml, per100g FROM unit_price WHERE product_id = ?')
+      .get(productId) as { per100ml: unknown; per100g: unknown };
+    expect(row.per100ml).toBeNull();
+    expect(row.per100g).toBeNull();
+  });
+
+  it('does NOT reject a computable weight result (per100ml NULL, per100g + formula set)', async () => {
+    // Regression: the pre-axis gate (per100ml⟺formula) would have rejected
+    // this as a "mixed NULL state". The generalized gate must accept it.
+    const { unitPriceId } = await t.repo.saveParsed({
+      rawId,
+      spec: weightSpec,
+      calc: weightCalc,
+    });
+    expect(unitPriceId).toBeTruthy();
+    expect(countRows(t.handle, 'unit_price')).toBe(1);
+  });
+
+  it('rejects a result with both per100ml and per100g set without writing rows', async () => {
+    const bad = {
+      ...fullCalc,
+      unitPrice: { per100ml: 0.665, per100g: 2.25, formula: '39.9/6000*100' },
+    } as CalcResult;
+    await expectZodReject(
+      t.repo.saveParsed({ rawId, spec: fullSpec, calc: bad }),
+      'per100g',
+    );
+    expect(countRows(t.handle, 'unit_price')).toBe(0);
+  });
+
+  it('rejects a non-finite per100g without writing rows', async () => {
+    const bad = {
+      ...fullCalc,
+      unitPrice: { per100ml: null, per100g: Infinity, formula: '45/2000*100' },
+    } as CalcResult;
+    await expectZodReject(
+      t.repo.saveParsed({ rawId, spec: weightSpec, calc: bad }),
+      'per100g',
+    );
+    expect(countRows(t.handle, 'unit_price')).toBe(0);
+  });
+
   it('keeps parse confidence and authoritative band in their own columns', async () => {
     const spec = ParsedSpecSchema.parse({ ...fullSpec, confidence: 0.6 });
     expect(fullCalc.confidence).toBe(0.95);
@@ -467,7 +574,7 @@ describe('saveParsed + getProduct', () => {
   it('rejects a non-finite per100ml without writing rows', async () => {
     const bad = {
       ...fullCalc,
-      unitPrice: { per100ml: Infinity, formula: '39.9/660*100' },
+      unitPrice: { per100ml: Infinity, per100g: null, formula: '39.9/660*100' },
     } as CalcResult;
     await expectZodReject(
       t.repo.saveParsed({ rawId, spec: fullSpec, calc: bad }),
@@ -479,11 +586,11 @@ describe('saveParsed + getProduct', () => {
   it('rejects a mixed per100ml/formula NULL state without writing rows', async () => {
     const bad = {
       ...fullCalc,
-      unitPrice: { per100ml: null, formula: '39.9/660*100' },
+      unitPrice: { per100ml: null, per100g: null, formula: '39.9/660*100' },
     } as CalcResult;
     await expectZodReject(
       t.repo.saveParsed({ rawId, spec: fullSpec, calc: bad }),
-      'per100ml',
+      'formula',
     );
     expect(countRows(t.handle, 'unit_price')).toBe(0);
   });

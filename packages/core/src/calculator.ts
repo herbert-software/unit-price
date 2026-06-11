@@ -1,6 +1,7 @@
-// tier3 calculator. Pure, no IO. Computes per100ml + canonical formula,
-// applies the unified uncomputable terminal state, the consistency gate, and
-// the single authoritative confidence banding.
+// tier3 calculator. Pure, no IO. Computes the per-axis unit price (per100ml for
+// the volume axis XOR per100g for the weight axis) + canonical formula, applies
+// the unified uncomputable terminal state, the consistency gate, and the single
+// authoritative confidence banding.
 import { checkConsistency, multiplierOf } from './consistency.js';
 import {
   hasUnitSizeAndQuantity,
@@ -8,8 +9,8 @@ import {
   meetsComputeRequiredSet,
   meetsFullSpecSet,
 } from './tiers.js';
-import type { ParsedSpec, UnitPrice } from './types.js';
-import { isVolumeUnit, toMl } from './units.js';
+import type { Measurement, ParsedSpec, UnitPrice } from './types.js';
+import { isVolumeUnit, isWeightUnit, toGrams, toMl } from './units.js';
 
 export interface CalcResult {
   unitPrice: UnitPrice;
@@ -23,16 +24,47 @@ const BAND_HIGH = 0.95; // >= 0.9
 const BAND_MID = 0.7; // (0.5, 0.9)
 const BAND_LOW = 0.3; // <= 0.5
 
-const WARN_NON_VOLUME = '本次仅支持容量单位的饮料';
-const WARN_NO_TOTAL = '无法确定总容量，无法计算每 100ml 单价';
-const WARN_BAD_PRICE = '价格无效（非正或非有限），无法计算每 100ml 单价';
+const WARN_NO_AXIS = '无法识别容量或重量单位，无法计算单价';
+const WARN_NO_TOTAL = '无法确定总量，无法计算单价';
+const WARN_BAD_PRICE = '价格无效（非正或非有限），无法计算单价';
 const WARN_INCONSISTENT = '规格不一致，总量不可信，已抑制单价';
 const WARN_INCOMPLETE = '规格不完整，未校验自洽性';
 
-/** Uncomputable terminal state: per100ml=null, no formula, warning, low conf. */
+/** Axis descriptor: conversion fn + per100 field key. Volume XOR weight. */
+type Axis = 'volume' | 'weight';
+
+interface AxisOps {
+  /** Convert a same-axis measurement to its base unit, or null off-axis. */
+  toBase: (m: Measurement) => number | null;
+  /** True if the unit is on this axis. */
+  isAxisUnit: (unit: Measurement['unit']) => boolean;
+  /** Which UnitPrice field this axis populates. */
+  per100Key: 'per100ml' | 'per100g';
+}
+
+const AXIS_OPS: Record<Axis, AxisOps> = {
+  volume: { toBase: toMl, isAxisUnit: isVolumeUnit, per100Key: 'per100ml' },
+  weight: { toBase: toGrams, isAxisUnit: isWeightUnit, per100Key: 'per100g' },
+};
+
+/**
+ * Resolve the product's axis from a single source: prefer `totalAmount.unit`,
+ * else `unitSize.unit`. Returns the axis or null (no size / unknown unit). The
+ * single source prevents cross-axis mixing (per100ml/per100g exactly-one
+ * invariant downstream).
+ */
+function axisOf(spec: ParsedSpec): Axis | null {
+  const source = spec.totalAmount ?? spec.unitSize;
+  if (source === null || source === undefined) return null;
+  if (isVolumeUnit(source.unit)) return 'volume';
+  if (isWeightUnit(source.unit)) return 'weight';
+  return null;
+}
+
+/** Uncomputable terminal state: both axes null, no formula, warning, low conf. */
 function uncomputable(warning: string): CalcResult {
   return {
-    unitPrice: { per100ml: null, formula: null },
+    unitPrice: { per100ml: null, per100g: null, formula: null },
     confidence: BAND_LOW,
     warnings: [warning],
   };
@@ -47,8 +79,9 @@ function fmt(n: number): string {
 }
 
 /**
- * tier3 entry. Computes per100ml from the final (merged) spec + price, or
- * routes to the unified uncomputable terminal state. Never emits NaN/Infinity.
+ * tier3 entry. Computes the per-axis unit price from the final (merged) spec +
+ * price, or routes to the unified uncomputable terminal state. Never emits
+ * NaN/Infinity.
  */
 export function calculate(spec: ParsedSpec, price: number): CalcResult {
   // price guard.
@@ -56,26 +89,13 @@ export function calculate(spec: ParsedSpec, price: number): CalcResult {
     return uncomputable(WARN_BAD_PRICE);
   }
 
-  // Resolve totalMl: prefer an explicit usable totalAmount; otherwise derive
-  // from unitSize + quantity (volume only).
-  const total = spec.totalAmount;
-  const explicitTotalUsable = hasUsableTotalAmount(spec);
-
-  // Non-volume totalAmount (weight etc.) -> uncomputable.
-  if (total !== null && total !== undefined && !isVolumeUnit(total.unit)) {
-    return uncomputable(WARN_NON_VOLUME);
+  // Axis dispatch from a single source. No axis (no size / unknown unit) ->
+  // uncomputable (both axes null).
+  const axis = axisOf(spec);
+  if (axis === null) {
+    return uncomputable(WARN_NO_AXIS);
   }
-
-  // unitSize present but non-volume (weight) with no usable volume total.
-  const unitSize = spec.unitSize;
-  if (
-    !explicitTotalUsable &&
-    unitSize !== null &&
-    unitSize !== undefined &&
-    !isVolumeUnit(unitSize.unit)
-  ) {
-    return uncomputable(WARN_NON_VOLUME);
-  }
+  const ops = AXIS_OPS[axis];
 
   // Presence-level computability (compute-required set, no consistency yet).
   if (!meetsComputeRequiredSet(spec, price)) {
@@ -88,43 +108,47 @@ export function calculate(spec: ParsedSpec, price: number): CalcResult {
     return uncomputable(WARN_INCONSISTENT);
   }
 
-  // Compute totalMl. Prefer explicit total; else derive from unitSize*qty*mult.
-  let totalMl: number | null = null;
+  // Compute total in axis base. Prefer explicit total; else derive from
+  // unitSize*qty*mult.
+  const total = spec.totalAmount;
+  const explicitTotalUsable = hasUsableTotalAmount(spec);
+  const unitSize = spec.unitSize;
+  let totalBase: number | null = null;
   if (explicitTotalUsable && total) {
-    totalMl = toMl(total);
+    totalBase = ops.toBase(total);
   } else if (hasUnitSizeAndQuantity(spec) && unitSize && spec.quantity != null) {
-    const unitSizeMl = toMl(unitSize);
-    if (unitSizeMl !== null) {
-      totalMl = unitSizeMl * spec.quantity * multiplierOf(spec);
+    const unitSizeBase = ops.toBase(unitSize);
+    if (unitSizeBase !== null) {
+      totalBase = unitSizeBase * spec.quantity * multiplierOf(spec);
     }
   }
 
-  // Defensive: no usable, finite, positive totalMl -> uncomputable.
-  if (totalMl === null || !Number.isFinite(totalMl) || totalMl <= 0) {
+  // Defensive: no usable, finite, positive total -> uncomputable.
+  if (totalBase === null || !Number.isFinite(totalBase) || totalBase <= 0) {
     return uncomputable(WARN_NO_TOTAL);
   }
 
-  const per100ml = (price / totalMl) * 100;
-  if (!Number.isFinite(per100ml)) {
+  const per100 = (price / totalBase) * 100;
+  if (!Number.isFinite(per100)) {
     return uncomputable(WARN_NO_TOTAL);
   }
 
   // Canonical formula: expanded form when unitSize/quantity known, else
-  // contracted form. Always uses ml-converted values.
+  // contracted form. Always uses axis-base-converted values.
   let formula: string;
   const useExpanded =
     hasUnitSizeAndQuantity(spec) && unitSize !== null && unitSize !== undefined;
   if (useExpanded && unitSize) {
-    const unitSizeMl = toMl(unitSize);
-    if (unitSizeMl !== null && spec.quantity != null) {
-      formula = `${fmt(price)} / (${fmt(unitSizeMl)} * ${fmt(spec.quantity)} * ${fmt(
+    const unitSizeBase = ops.toBase(unitSize);
+    if (unitSizeBase !== null && spec.quantity != null) {
+      formula = `${fmt(price)} / (${fmt(unitSizeBase)} * ${fmt(spec.quantity)} * ${fmt(
         multiplierOf(spec),
       )}) * 100`;
     } else {
-      formula = `${fmt(price)} / ${fmt(totalMl)} * 100`;
+      formula = `${fmt(price)} / ${fmt(totalBase)} * 100`;
     }
   } else {
-    formula = `${fmt(price)} / ${fmt(totalMl)} * 100`;
+    formula = `${fmt(price)} / ${fmt(totalBase)} * 100`;
   }
 
   // Confidence banding — single authoritative value from final result quality.
@@ -139,5 +163,9 @@ export function calculate(spec: ParsedSpec, price: number): CalcResult {
     warnings.push(WARN_INCOMPLETE);
   }
 
-  return { unitPrice: { per100ml, formula }, confidence, warnings };
+  // Exactly one axis field is non-null; the other stays null.
+  const unitPrice: UnitPrice = { per100ml: null, per100g: null, formula };
+  unitPrice[ops.per100Key] = per100;
+
+  return { unitPrice, confidence, warnings };
 }

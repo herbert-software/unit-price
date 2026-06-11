@@ -13,6 +13,7 @@ export const ExpectedSpecSchema = z
     quantity: z.number().nullable().optional(),
     totalAmount: z.number().nullable().optional(),
     per100ml: z.number().nullable().optional(),
+    per100g: z.number().nullable().optional(),
   })
   .passthrough();
 

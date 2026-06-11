@@ -4,9 +4,9 @@
 // nothing); reads rebuild typed domain objects and re-validate them — callers
 // never see bare rows.
 //
-// No domain computation happens here: per100ml/formula are stored verbatim
-// from core's CalcResult (never recomputed from the integer-cents price), and
-// the only transformations are storage codecs (see codec.ts).
+// No domain computation happens here: per100ml/per100g/formula are stored
+// verbatim from core's CalcResult (never recomputed from the integer-cents
+// price), and the only transformations are storage codecs (see codec.ts).
 import {
   ParsedSpecSchema,
   RawProductSchema,
@@ -65,9 +65,13 @@ const FiniteRawPriceGate = z.object({ price: FiniteNumber });
  * Core exports no CalcResultSchema (CalcResult is interface-only), so the
  * gate is composed from the exported pieces: UnitPriceSchema for the nested
  * unit price, WarningsSchema for warnings, and bounded confidence. On top of
- * UnitPriceSchema it enforces two storage invariants: per100ml must be finite
- * when present, and per100ml/formula are NULL together or set together
- * (uncomputable → both NULL; computable → both non-null).
+ * UnitPriceSchema it enforces the axis storage invariants:
+ *  - per100ml/per100g must each be finite when present;
+ *  - a product sits on at most one axis — per100ml and per100g are never both
+ *    non-null;
+ *  - formula is non-null IFF one of per100ml/per100g is non-null (computable →
+ *    that axis price + formula set, the other axis NULL; uncomputable →
+ *    per100ml/per100g/formula all NULL).
  */
 const CalcResultGate = z.object({
   unitPrice: UnitPriceSchema.superRefine((up, ctx) => {
@@ -78,11 +82,28 @@ const CalcResultGate = z.object({
         message: 'per100ml must be finite or null',
       });
     }
-    if ((up.per100ml === null) !== (up.formula === null)) {
+    if (up.per100g !== null && !Number.isFinite(up.per100g)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        path: ['per100ml'],
-        message: 'per100ml and formula must be both NULL or both set',
+        path: ['per100g'],
+        message: 'per100g must be finite or null',
+      });
+    }
+    if (up.per100ml !== null && up.per100g !== null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['per100g'],
+        message:
+          'per100ml and per100g must not both be set (a product is on at most one axis)',
+      });
+    }
+    const hasAxis = up.per100ml !== null || up.per100g !== null;
+    if (hasAxis === (up.formula === null)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['formula'],
+        message:
+          'formula must be non-null IFF one of per100ml/per100g is non-null',
       });
     }
   }),
@@ -130,7 +151,7 @@ export interface ProductRecord {
   productId: string;
   rawId: string;
   spec: ParsedSpec;
-  /** CalcResult shape: { unitPrice: { per100ml, formula }, confidence, warnings }. */
+  /** CalcResult shape: { unitPrice: { per100ml, per100g, formula }, confidence, warnings }. */
   calc: CalcResult;
 }
 
@@ -278,6 +299,7 @@ export function createRepository(db: Db | null | undefined): Repository {
         id: unitPriceId,
         productId,
         per100ml: calc.unitPrice.per100ml,
+        per100g: calc.unitPrice.per100g,
         formula: calc.unitPrice.formula,
         confidence: calc.confidence,
         warnings: encodeJson(calc.warnings),
@@ -401,7 +423,11 @@ export function createRepository(db: Db | null | undefined): Repository {
         confidence: p.confidence,
       });
       const calc = CalcResultGate.parse({
-        unitPrice: { per100ml: up.per100ml, formula: up.formula },
+        unitPrice: {
+          per100ml: up.per100ml,
+          per100g: up.per100g,
+          formula: up.formula,
+        },
         confidence: up.confidence,
         warnings: decodeJson(up.warnings),
       });

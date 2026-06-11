@@ -366,3 +366,152 @@ describe('tier1 parser', () => {
     expect(parseTier1(raw('多维刺梨柠檬饮 2.1L(100mL×21)', 69.9)).spec.quantity).toBe(21);
   });
 });
+
+// 重量轴:tier1 解析 -> tier3 计算端到端 (per100g, per100ml=null)
+describe('weight axis — parse + compute', () => {
+  // 4.1 单件重量品(kg 单件、无数量信号 -> 单件推断 quantity=1)
+  it('infers a single 2kg unit and computes per100g=2.25 (水蜜黄桃2kg)', () => {
+    const { spec, warnings } = parseTier1(raw('水蜜黄桃2kg', 45));
+    expect(spec.unitSize).toEqual({ value: 2, unit: 'kg' });
+    expect(spec.quantity).toBe(1);
+    expect(spec.totalAmount).toEqual({ value: 2, unit: 'kg' });
+    expect(warnings).toContain('数量按单件推断为 1');
+    const { unitPrice } = calculate(spec, 45);
+    // 45 / 2000g * 100 = 2.25
+    expect(unitPrice.per100g).toBeCloseTo(2.25, 6);
+    expect(unitPrice.per100ml).toBeNull();
+  });
+
+  // 4.2 多包装重量品(乘号抽取 -> quantity=24,不进单件推断)
+  it('extracts 300g*24 -> quantity=24, total 7200g, per100g≈0.833 (MM 有机玉米汁)', () => {
+    const { spec, warnings } = parseTier1(raw('MM 有机玉米汁 300g*24', 60));
+    expect(spec.unitSize).toEqual({ value: 300, unit: 'g' });
+    expect(spec.quantity).toBe(24);
+    expect(spec.totalAmount).toEqual({ value: 7200, unit: 'g' });
+    // 乘号是数量信号 -> 不触发单件推断
+    expect(warnings).not.toContain('数量按单件推断为 1');
+    const { unitPrice } = calculate(spec, 60);
+    // 60 / 7200g * 100 ≈ 0.8333
+    expect(unitPrice.per100g).toBeCloseTo(0.8333, 4);
+    expect(unitPrice.per100ml).toBeNull();
+  });
+
+  // 4.3 `g×N` 写法 (`x` 形式的乘号)
+  it('extracts the gxN multiplier (270gx15 -> quantity=15, total 4050g)', () => {
+    const { spec } = parseTier1(raw('樱桃番茄NFC复合果蔬汁 270gx15', 81));
+    expect(spec.unitSize).toEqual({ value: 270, unit: 'g' });
+    expect(spec.quantity).toBe(15);
+    expect(spec.totalAmount).toEqual({ value: 4050, unit: 'g' });
+    const { unitPrice } = calculate(spec, 81);
+    // 81 / 4050g * 100 = 2 (非 null)
+    expect(unitPrice.per100g).not.toBeNull();
+    expect(unitPrice.per100g).toBeCloseTo(2, 6);
+    expect(unitPrice.per100ml).toBeNull();
+  });
+
+  // 4.4 干净 kg 单件、无游离件数 -> 单件推断
+  it('infers a single 2.5kg unit and computes per100g=2 (妃子笑荔枝 2.5kg)', () => {
+    const { spec, warnings } = parseTier1(raw('妃子笑荔枝 2.5kg', 50));
+    expect(spec.unitSize).toEqual({ value: 2.5, unit: 'kg' });
+    expect(spec.quantity).toBe(1);
+    expect(spec.totalAmount).toEqual({ value: 2.5, unit: 'kg' });
+    expect(warnings).toContain('数量按单件推断为 1');
+    const { unitPrice } = calculate(spec, 50);
+    // 50 / 2500g * 100 = 2
+    expect(unitPrice.per100g).toBeCloseTo(2, 6);
+    expect(unitPrice.per100ml).toBeNull();
+  });
+
+  // 4.5 formula 留痕:g 基准,展开式 + kg->g 换算后的数值(禁止用未换算字面 2/2.5)
+  it('renders weight formulas in g base (expanded 7200g, kg converted to g)', () => {
+    // 多包装展开式:60 / (300 * 24 * 1) * 100
+    const multi = parseTier1(raw('MM 有机玉米汁 300g*24', 60)).spec;
+    expect(calculate(multi, 60).unitPrice.formula).toBe('60 / (300 * 24 * 1) * 100');
+
+    // 单件 kg 收缩展开:2kg -> 2000g,禁止出现未换算的字面 2(否则 (2 * ...))
+    const single = parseTier1(raw('水蜜黄桃2kg', 45)).spec;
+    const f = calculate(single, 45).unitPrice.formula;
+    expect(f).toBe('45 / (2000 * 1 * 1) * 100');
+    expect(f).not.toContain('(2 *');
+  });
+
+  // 4.6 轴互斥不变量:重量品 per100ml===null、容量品 per100g===null,恰一非空
+  it('keeps the per100ml/per100g axes mutually exclusive (exactly one non-null)', () => {
+    const weight = calculate(parseTier1(raw('水蜜黄桃2kg', 45)).spec, 45).unitPrice;
+    expect(weight.per100ml).toBeNull();
+    expect(weight.per100g).not.toBeNull();
+
+    const volume = calculate(parseTier1(raw('可口可乐 330ml*24听', 40)).spec, 40).unitPrice;
+    expect(volume.per100g).toBeNull();
+    expect(volume.per100ml).not.toBeNull();
+
+    // 恰一非空:对两类商品分别断言互斥
+    for (const up of [weight, volume]) {
+      expect((up.per100ml === null) !== (up.per100g === null)).toBe(true);
+    }
+  });
+
+  // 4.8 不可算残留:无 size / 裸编号 / 游离件数(枚) -> 两轴 null;价≤0 走终态
+  it('leaves uncomputable weight/volume titles at the both-null terminal state', () => {
+    // 无 size(只有包装件数,无单位规格)
+    const noSize = parseTier1(raw('MM 现泡铂金黑咖啡 15瓶'));
+    const noSizeUp = calculate(noSize.spec, 1).unitPrice;
+    expect(noSizeUp.per100ml).toBeNull();
+    expect(noSizeUp.per100g).toBeNull();
+
+    // 裸编号(品名数字 900 是游离数字 -> 抑制单件推断 -> 残留 null)
+    const bareNum = parseTier1(raw('LFE 进口埃德华兹900单一葡萄园干红葡萄酒 750mL', 200));
+    expect(bareNum.spec.quantity).toBeNull();
+    const bareUp = calculate(bareNum.spec, 200).unitPrice;
+    expect(bareUp.per100ml).toBeNull();
+    expect(bareUp.per100g).toBeNull();
+
+    // 件数游离数字:`枚` 不在包装单位集,`30` 作游离数字抑制单件推断 -> 两轴 null
+    const egg = parseTier1(raw('MM 精选鲜鸡蛋 1.59kg(30枚)', 30));
+    expect(egg.spec.unitSize).toEqual({ value: 1.59, unit: 'kg' });
+    expect(egg.spec.quantity).toBeNull();
+    expect(egg.warnings).not.toContain('数量按单件推断为 1');
+    const eggUp = calculate(egg.spec, 30).unitPrice;
+    expect(eggUp.per100ml).toBeNull();
+    expect(eggUp.per100g).toBeNull();
+
+    // 价≤0 走终态(对可算重量品也一样)
+    const badPrice = calculate(parseTier1(raw('水蜜黄桃2kg')).spec, 0);
+    expect(badPrice.unitPrice.per100g).toBeNull();
+    expect(badPrice.unitPrice.per100ml).toBeNull();
+    expect(badPrice.confidence).toBeLessThanOrEqual(0.5);
+  });
+});
+
+// 4.7 容量回归(零误伤):重量轴改动不波及既有 ml 路径
+describe('volume axis — no regression from the weight axis', () => {
+  it('矿泉水 4L -> per100ml unchanged, per100g null', () => {
+    const up = calculate(parseTier1(raw('矿泉水 4L', 8)).spec, 8).unitPrice;
+    // 8 / 4000ml * 100 = 0.2
+    expect(up.per100ml).toBeCloseTo(0.2, 6);
+    expect(up.per100g).toBeNull();
+    expect(up.formula).toBe('8 / (4000 * 1 * 1) * 100');
+  });
+
+  it('啤酒 500ml*12 -> per100ml unchanged, per100g null', () => {
+    const up = calculate(parseTier1(raw('啤酒 500ml*12', 36)).spec, 36).unitPrice;
+    // 36 / 6000ml * 100 = 0.6
+    expect(up.per100ml).toBeCloseTo(0.6, 6);
+    expect(up.per100g).toBeNull();
+    expect(up.formula).toBe('36 / (500 * 12 * 1) * 100');
+  });
+
+  it('葡萄酒 750mL single bottle -> per100ml unchanged, per100g null', () => {
+    const up = calculate(parseTier1(raw('葡萄酒 750mL', 75)).spec, 75).unitPrice;
+    // 单件推断 -> 75 / 750ml * 100 = 10
+    expect(up.per100ml).toBeCloseTo(10, 6);
+    expect(up.per100g).toBeNull();
+  });
+
+  it('330ml*24听 -> per100ml unchanged, per100g null, ml formula unchanged', () => {
+    const up = calculate(parseTier1(raw('可口可乐 330ml*24听', 40)).spec, 40).unitPrice;
+    expect(up.per100ml).toBeCloseTo(0.505, 3);
+    expect(up.per100g).toBeNull();
+    expect(up.formula).toBe('40 / (330 * 24 * 1) * 100');
+  });
+});

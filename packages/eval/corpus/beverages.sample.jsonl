@@ -7,3 +7,6 @@
 {"title":"汾酒沪上青花 清香型白酒 53度 500mL","source":"manual","priceCents":3000,"expected":{"unitSize":500,"quantity":1,"totalAmount":500,"per100ml":6}}
 {"title":"汾酒 55%vol清香型白酒 950ml","source":"manual","priceCents":9500,"expected":{"unitSize":950,"quantity":1,"totalAmount":950,"per100ml":10}}
 {"title":"LFE 进口埃德华兹900单一葡萄园干红葡萄酒 750mL","source":"manual","priceCents":20000,"expected":{"unitSize":750,"quantity":null,"per100ml":null}}
+{"title":"水蜜黄桃2kg","source":"manual","priceCents":4500,"expected":{"unitSize":2,"quantity":1,"totalAmount":2,"per100g":2.25,"per100ml":null}}
+{"title":"MM 有机玉米汁 300g*24","source":"manual","priceCents":6000,"expected":{"unitSize":300,"quantity":24,"totalAmount":7200,"per100g":0.833,"per100ml":null}}
+{"title":"MM 精选鲜鸡蛋 1.59kg(30枚)","source":"manual","expected":{"unitSize":1.59,"quantity":null,"per100g":null,"per100ml":null}}

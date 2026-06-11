@@ -170,6 +170,7 @@ describe('scoreCorpus — tier2 lane', () => {
         hitTotalAmount: true,
         quantity: sample.samPkgNum ?? null,
         per100ml: 1,
+        per100g: null,
         hasUsablePrice: sample.priceCents != null && sample.priceCents > 0,
       }),
     });

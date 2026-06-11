@@ -3,9 +3,11 @@
 // Volume aliases normalize to the canonical symbols `ml`/`L` WITHOUT crossing
 // the ml<->L boundary at parse time (`升` -> `L`, `毫升`/`mL` -> `ml`). The
 // ml<->L conversion only happens here, inside unit-price-calc, via `toMl`.
-// Weight aliases normalize to `g`/`kg` (`斤` => 500g). Weight units are
-// recognized only; they never enter per100ml (callers route them to the
-// uncomputable terminal state).
+// Weight aliases normalize to `g`/`kg` (`斤` => 500g) WITHOUT crossing the
+// g<->kg boundary at parse time (`千克`/`公斤` -> `kg`, `克` -> `g`). The
+// g<->kg conversion only happens here, inside unit-price-calc, via `toGrams`.
+// Weight units feed the weight axis (per100g); they never enter per100ml. The
+// two axes are independent — no density conversion (g<->ml) is ever performed.
 import type { Measurement, Unit } from './types.js';
 
 /** Canonical conversion factors to a base within each dimension. */
@@ -19,11 +21,15 @@ const TO_BASE: Record<Unit, number> = {
 /** Volume units that can be converted to ml (and thus participate in calc). */
 export const VOLUME_UNITS: ReadonlySet<Unit> = new Set<Unit>(['ml', 'L']);
 
-/** Weight units — recognized only, never computed for per100ml. */
+/** Weight units that can be converted to grams (and thus participate in calc). */
 export const WEIGHT_UNITS: ReadonlySet<Unit> = new Set<Unit>(['g', 'kg']);
 
 export function isVolumeUnit(unit: Unit): boolean {
   return VOLUME_UNITS.has(unit);
+}
+
+export function isWeightUnit(unit: Unit): boolean {
+  return WEIGHT_UNITS.has(unit);
 }
 
 /**
@@ -86,5 +92,15 @@ export function normalizeMeasurement(value: number, unitToken: string): Measurem
  */
 export function toMl(m: Measurement): number | null {
   if (!isVolumeUnit(m.unit)) return null;
+  return m.value * TO_BASE[m.unit];
+}
+
+/**
+ * Convert a weight Measurement to grams. Returns null for volume units
+ * (per100g is undefined for volume) — callers treat null as uncomputable.
+ * Mirrors `toMl`; reuses the same `TO_BASE` factors (`g:1`, `kg:1000`).
+ */
+export function toGrams(m: Measurement): number | null {
+  if (!isWeightUnit(m.unit)) return null;
   return m.value * TO_BASE[m.unit];
 }

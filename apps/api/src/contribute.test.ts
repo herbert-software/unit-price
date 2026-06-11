@@ -208,10 +208,13 @@ describe('POST /contribute — dedupe + provenance COALESCE (5.3)', () => {
   });
 });
 
-describe('POST /contribute — uncomputable product still lands (5.4)', () => {
-  it('non-volume unit -> 200, per100ml null in body and NULL in unit_price', async () => {
-    // tier1 extracts a weight (2kg) — a non-volume unit is a CERTAIN null the
-    // LLM cannot change, so tier2 is skipped (throwingPort is never reached).
+describe('POST /contribute — weight product computes per100g and lands (5.4/5.5)', () => {
+  it('weight unit (2kg) -> 200, per100g set / per100ml null in body, persisted on the weight axis', async () => {
+    // tier1 extracts a clean weight single unit (2kg, qty inferred = 1) — a
+    // determinate WEIGHT-axis verdict, so tier2 is skipped (throwingPort never
+    // reached). The weight axis computes per100g = 30/2000*100 = 1.5 and the
+    // volume axis is null. The saveParsed write path lands per100g into the
+    // unit_price row (and leaves per100ml NULL), proving axis-correct persistence.
     const { repo, handle } = openRepo();
     const { res, json } = await contribute({
       port: throwingPort,
@@ -220,13 +223,15 @@ describe('POST /contribute — uncomputable product still lands (5.4)', () => {
     });
     expect(res.status).toBe(200);
     expect(json.unitPrice.per100ml).toBeNull();
-    // "Definitely uncomputable" is a valid data point: rows are still written.
+    expect(json.unitPrice.per100g).toBeCloseTo(1.5, 6);
+    expect(json.unitPrice.formula).not.toBeNull();
     expect(countRows(handle, 'product')).toBe(1);
     expect(countRows(handle, 'unit_price')).toBe(1);
     const up = handle
-      .prepare('SELECT per100ml FROM unit_price WHERE id = ?')
-      .get(json.unitPriceId) as { per100ml: number | null };
+      .prepare('SELECT per100ml, per100g FROM unit_price WHERE id = ?')
+      .get(json.unitPriceId) as { per100ml: number | null; per100g: number | null };
     expect(up.per100ml).toBeNull();
+    expect(up.per100g).toBeCloseTo(1.5, 6);
   });
 });
 

@@ -9,9 +9,9 @@ import {
   ParsedSpecSchema,
   calculate,
   isVolumeUnit,
+  isWeightUnit,
   meetsComputeRequiredSet,
   parseTier1,
-  toMl,
   type ParsedSpec,
   type RawProduct,
   type UnitPrice,
@@ -53,11 +53,16 @@ function mergeSpecs(tier1: ParsedSpec, llm: ParsedSpec): ParsedSpec {
   // both are present and totalAmount is still absent — mirrors tier1's own
   // derivation so an LLM-completed full spec isn't penalized to mid band for a
   // field the system can compute. Confidence is "result quality only" (spec).
-  if (!present(totalAmount) && present(unitSize) && present(quantity) && isVolumeUnit(unitSize.unit)) {
-    const ml = toMl(unitSize);
-    if (ml !== null) {
-      totalAmount = { value: ml * quantity, unit: 'ml' };
-    }
+  // Applies on either axis (volume ml/L OR weight g/kg). The derived total keeps
+  // the unitSize's own axis unit — parsing never crosses ml<->L or g<->kg (the
+  // calculator converts later) — matching the tier1 parser derivation.
+  if (
+    !present(totalAmount) &&
+    present(unitSize) &&
+    present(quantity) &&
+    (isVolumeUnit(unitSize.unit) || isWeightUnit(unitSize.unit))
+  ) {
+    totalAmount = { value: unitSize.value * quantity, unit: unitSize.unit };
   }
 
   return {
@@ -89,23 +94,37 @@ function hasAnyShapeForJudgement(spec: ParsedSpec): boolean {
 /**
  * Whether tier1 alone already yields a DETERMINATE verdict, so tier2 (the LLM)
  * cannot change the outcome and must be skipped. Determinate when: (a) tier1
- * meets the compute-required set (a number), (b) price <= 0 (certain null —
- * the LLM can't fix price), or (c) tier1 extracted a non-volume unit such as a
- * weight (certain null — the LLM can't make a weight a volume). Only when none
- * holds (price > 0, compute set unmet, and no non-volume signal — i.e. a spec
- * field is genuinely missing and fillable from the title) do we call tier2.
+ * meets the compute-required set (a number on either axis), (b) price <= 0
+ * (certain null — the LLM can't fix price), or (c) tier1 extracted a WEIGHT unit
+ * (g/kg). A weight unit is determinate: tier1 already gives the certain verdict
+ * for the weight axis — either a computed `per100g` (single-unit-inferred, met
+ * by the compute-required check above) or a certain `null` (e.g. a free-digit
+ * piece count such as `30枚` suppresses the single-unit inference) — and the LLM
+ * can neither move a weight onto the volume axis nor override tier1's extracted
+ * weight size. A volume unit is NOT listed here: a bare volume `unitSize` whose
+ * quantity is genuinely missing is fillable by tier2, so it must fall through.
+ * Only when none of (a)/(b)/(c) holds (price > 0, compute set unmet, and no
+ * weight signal — i.e. a fillable gap on the volume axis) do we call tier2.
  */
 function tier1YieldsDeterminate(spec: ParsedSpec, price: number): boolean {
   if (meetsComputeRequiredSet(spec, price)) return true; // computable -> a number
   if (!(price > 0)) return true; // price <= 0 -> certain null
   const t = spec.totalAmount;
   const u = spec.unitSize;
-  if (t && !isVolumeUnit(t.unit)) return true; // non-volume -> certain null
-  if (u && !isVolumeUnit(u.unit)) return true;
-  // Derivable-but-non-positive total: tier1 has both a volume unitSize and a
-  // quantity, but unitSize.value<=0 or quantity<=0 -> derived totalMl<=0 is a
+  // Weight unit -> tier1 verdict is determinate (a per100g number above, or a
+  // certain null); the LLM can't move a weight onto the volume axis.
+  if (t && isWeightUnit(t.unit)) return true;
+  if (u && isWeightUnit(u.unit)) return true;
+  // Derivable-but-non-positive total: tier1 has both an on-axis unitSize and a
+  // quantity, but unitSize.value<=0 or quantity<=0 -> derived total<=0 is a
   // CERTAIN null the LLM cannot fix (it can't change tier1's extracted qty).
-  if (u && present(spec.quantity) && isVolumeUnit(u.unit) && (u.value <= 0 || spec.quantity <= 0)) {
+  // Weight already returned above; this guards the volume case symmetrically.
+  if (
+    u &&
+    present(spec.quantity) &&
+    (isVolumeUnit(u.unit) || isWeightUnit(u.unit)) &&
+    (u.value <= 0 || spec.quantity <= 0)
+  ) {
     return true;
   }
   return false;

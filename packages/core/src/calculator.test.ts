@@ -50,18 +50,17 @@ describe('tier3 calculator — L conversion in formula', () => {
 });
 
 describe('tier3 calculator — uncomputable terminal states', () => {
-  it('weight unit (kg) is uncomputable', () => {
+  it('weight unit (kg) computes per100g on the weight axis, per100ml stays null', () => {
     const r = calculate(spec({ totalAmount: { value: 2, unit: 'kg' } }), 10);
     expect(r.unitPrice.per100ml).toBeNull();
-    expect(r.unitPrice.formula).toBeNull();
-    expect(r.warnings.length).toBeGreaterThan(0);
-    expect(r.confidence).toBeLessThanOrEqual(0.5);
+    expect(r.unitPrice.per100g).toBeCloseTo(0.5, 6);
+    expect(r.unitPrice.formula).toBe('10 / 2000 * 100');
   });
 
-  it('weight unitSize (g) without volume total is uncomputable', () => {
+  it('weight unitSize (g) without volume total computes per100g on the weight axis', () => {
     const r = calculate(spec({ unitSize: { value: 500, unit: 'g' }, quantity: 2 }), 10);
     expect(r.unitPrice.per100ml).toBeNull();
-    expect(r.confidence).toBeLessThanOrEqual(0.5);
+    expect(r.unitPrice.per100g).toBeCloseTo(1, 6);
   });
 
   it('null total is uncomputable, no NaN/Infinity', () => {
@@ -130,6 +129,43 @@ describe('tier3 calculator — consistency gate', () => {
     expect(r.unitPrice.formula).toBe('30 / (1250 * 6 * 1) * 100');
     expect(r.confidence).toBeGreaterThanOrEqual(0.9);
     expect(r.warnings).toEqual([]);
+  });
+});
+
+describe('tier3 calculator — weight axis consistency gate', () => {
+  // 4.9 重量满规格自洽品上高档(pin consistency.ts 重量分支):300g*24 == 7200g
+  it('rates a self-consistent weight full-spec product high (300g*24 == 7200g)', () => {
+    const r = calculate(
+      spec({
+        unitSize: { value: 300, unit: 'g' },
+        quantity: 24,
+        totalAmount: { value: 7200, unit: 'g' },
+      }),
+      60,
+    );
+    // 与容量满规格同档:consistent + 高置信(防被错降为 skipped/中档)。
+    expect(r.unitPrice.per100g).toBeCloseTo(0.8333, 4);
+    expect(r.unitPrice.per100ml).toBeNull();
+    expect(r.unitPrice.formula).toBe('60 / (300 * 24 * 1) * 100');
+    expect(r.confidence).toBeGreaterThanOrEqual(0.9);
+    expect(r.warnings).toEqual([]);
+  });
+
+  // 4.10 重量不一致抑制单价:300g*24 (=7200g) vs 声明 3600g -> 不自洽
+  it('suppresses the unit price when the weight spec is inconsistent (300g*24 vs 3600g)', () => {
+    const r = calculate(
+      spec({
+        unitSize: { value: 300, unit: 'g' },
+        quantity: 24,
+        totalAmount: { value: 3600, unit: 'g' },
+      }),
+      60,
+    );
+    expect(r.unitPrice.per100g).toBeNull();
+    expect(r.unitPrice.per100ml).toBeNull();
+    expect(r.unitPrice.formula).toBeNull();
+    expect(r.confidence).toBeLessThanOrEqual(0.5);
+    expect(r.warnings.length).toBeGreaterThan(0);
   });
 });
 
