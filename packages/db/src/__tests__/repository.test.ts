@@ -509,17 +509,25 @@ describe('saveParsed + getProduct', () => {
     expect(countRows(t.handle, 'product')).toBe(1);
     expect(countRows(t.handle, 'unit_price')).toBe(1);
 
-    // Force the second statement of the transaction to fail: reuse the
-    // existing unit_price PK. The product insert succeeds inside the tx,
-    // then the unit_price UNIQUE violation must roll it back.
+    // The second call MUST take the real insert path so the unit_price insert
+    // is actually attempted — under dedupe a same-spec resubmit would hit the
+    // existing-row branch and never insert unit_price, so the UNIQUE conflict
+    // would never fire. Use a DIFFERENT spec (→ different dedupe_key → product
+    // insert succeeds), then reuse the first unit_price PK to force the second
+    // statement of the transaction to fail. The product insert succeeds inside
+    // the tx, then the unit_price PK UNIQUE violation must roll it back.
+    const otherSpec = ParsedSpecSchema.parse({ ...fullSpec, quantity: 12 });
+    const otherCalc = calculate(otherSpec, 39.9);
     await expect(
       t.repo.saveParsed({
         rawId,
-        spec: fullSpec,
-        calc: fullCalc,
+        spec: otherSpec,
+        calc: otherCalc,
         unitPriceId: first.unitPriceId,
       }),
     ).rejects.toThrow(/UNIQUE/i);
+    // Product rolled back to the pre-call count (no orphan product row, no
+    // extra unit_price): still exactly the first pair.
     expect(countRows(t.handle, 'product')).toBe(1);
     expect(countRows(t.handle, 'unit_price')).toBe(1);
   });
@@ -540,6 +548,114 @@ describe('saveParsed + getProduct', () => {
 
   it('getProduct returns null for an unknown id', async () => {
     expect(await t.repo.getProduct('missing-id')).toBeNull();
+  });
+});
+
+describe('saveParsed dedupe (sqlite path)', () => {
+  let t: TestDb;
+  let rawId: string;
+  beforeEach(async () => {
+    t = openTestDb();
+    rawId = await t.repo.upsertRaw(rawInput());
+  });
+
+  it('same rawId + same spec twice → one product, one unit_price, same id pair', async () => {
+    const first = await t.repo.saveParsed({
+      rawId,
+      spec: fullSpec,
+      calc: fullCalc,
+    });
+    const second = await t.repo.saveParsed({
+      rawId,
+      spec: fullSpec,
+      calc: fullCalc,
+    });
+    // Idempotent: the second call returns the existing (oldest) pair, inserts
+    // nothing — one product, one unit_price (no orphan).
+    expect(second).toEqual(first);
+    expect(countRows(t.handle, 'product')).toBe(1);
+    expect(countRows(t.handle, 'unit_price')).toBe(1);
+  });
+
+  it('different specs (same rawId) → two products, not deduped', async () => {
+    const specB = ParsedSpecSchema.parse({ ...fullSpec, quantity: 12 });
+    const a = await t.repo.saveParsed({ rawId, spec: fullSpec, calc: fullCalc });
+    const b = await t.repo.saveParsed({
+      rawId,
+      spec: specB,
+      calc: calculate(specB, 39.9),
+    });
+    // Distinct dedupe keys → each lands its own product row.
+    expect(b.productId).not.toBe(a.productId);
+    expect(b.unitPriceId).not.toBe(a.unitPriceId);
+    expect(countRows(t.handle, 'product')).toBe(2);
+    expect(countRows(t.handle, 'unit_price')).toBe(2);
+  });
+
+  it('price/formula change (same spec) → still one product, returns oldest pair', async () => {
+    const first = await t.repo.saveParsed({
+      rawId,
+      spec: fullSpec,
+      calc: calculate(fullSpec, 39.9),
+    });
+    // Same spec, different price → different per100ml/formula, same dedupe key.
+    const cheaper = calculate(fullSpec, 19.9);
+    expect(cheaper.unitPrice.per100ml).not.toBe(fullCalc.unitPrice.per100ml);
+    const second = await t.repo.saveParsed({
+      rawId,
+      spec: fullSpec,
+      calc: cheaper,
+    });
+    expect(second).toEqual(first);
+    expect(countRows(t.handle, 'product')).toBe(1);
+    expect(countRows(t.handle, 'unit_price')).toBe(1);
+    // The stored unit_price is the FIRST one (oldest wins), not the resubmit.
+    const row = t.handle
+      .prepare('SELECT per100ml FROM unit_price WHERE product_id = ?')
+      .get(first.productId) as { per100ml: number };
+    expect(row.per100ml).toBe(fullCalc.unitPrice.per100ml);
+  });
+
+  it('confidence change (same spec) → still one product, returns oldest pair', async () => {
+    const specLow = ParsedSpecSchema.parse({ ...fullSpec, confidence: 0.3 });
+    const specHigh = ParsedSpecSchema.parse({ ...fullSpec, confidence: 0.95 });
+    const first = await t.repo.saveParsed({
+      rawId,
+      spec: specLow,
+      calc: calculate(specLow, 39.9),
+    });
+    const second = await t.repo.saveParsed({
+      rawId,
+      spec: specHigh,
+      calc: calculate(specHigh, 39.9),
+    });
+    // Parse confidence is excluded from the dedupe key → same product, oldest
+    // row kept (its stored confidence is the first one's).
+    expect(second).toEqual(first);
+    expect(countRows(t.handle, 'product')).toBe(1);
+    const row = t.handle
+      .prepare('SELECT confidence FROM product WHERE id = ?')
+      .get(first.productId) as { confidence: number };
+    expect(row.confidence).toBe(0.3);
+  });
+
+  it('unique index is the source of truth: a second product with the same dedupe_key is rejected at the DB', () => {
+    // Bypass saveParsed and insert two product rows that share a dedupe_key
+    // directly — the DB unique index, not the application layer, must reject
+    // the second. (Harness sets PRAGMA foreign_keys=ON, matching the
+    // atomicity test, so the valid raw_id below satisfies the FK.)
+    const insert = t.handle.prepare(
+      `INSERT INTO product
+         (id, raw_id, unit_size_value, unit_size_unit, quantity, multipliers,
+          total_amount_value, total_amount_unit, package_unit, category,
+          confidence, dedupe_key)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const row = (id: string) =>
+      [id, rawId, 1, 'L', 6, '[1]', 6, 'L', '瓶', 'beverage', 0.9, 'dup-key'] as const;
+    insert.run(...row('prod-a'));
+    expect(() => insert.run(...row('prod-b'))).toThrow(/UNIQUE/i);
+    expect(countRows(t.handle, 'product')).toBe(1);
   });
 });
 

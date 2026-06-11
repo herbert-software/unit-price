@@ -15,7 +15,8 @@
     "build": "tsc -b",
     "test": "vitest run",
     "generate": "drizzle-kit generate",
-    "migrate": "drizzle-kit migrate"
+    "migrate": "drizzle-kit migrate",
+    "dedupe:cleanup": "tsx scripts/dedupe-cleanup.ts"
   },
   "dependencies": {
     "@unit-price/core": "workspace:*",
@@ -28,6 +29,7 @@
     "better-sqlite3": "^12.10.0",
     "drizzle-kit": "^0.31.10",
     "miniflare": "^4.20260609.0",
+    "tsx": "^4.22.4",
     "vitest": "^4.1.8"
   }
 }

@@ -29,6 +29,7 @@ import {
   yuanToCents,
 } from './codec.js';
 import type { Db } from './db.js';
+import { computeDedupeKey } from './dedupe.js';
 import { corrections, product, productRaw, unitPrice } from './schema.js';
 
 /**
@@ -154,6 +155,40 @@ function queryOrm(db: Db): BetterSQLite3Database<Record<string, never>> {
   return db.orm as unknown as BetterSQLite3Database<Record<string, never>>;
 }
 
+/**
+ * Load the existing (oldest) product + unit_price pair for a dedupe_key.
+ * Returns null when no product matches the key (caller decides whether that is
+ * a miss to insert through or a post-conflict invariant violation). A matched
+ * product with no unit_price is data corruption (the first write is atomic), so
+ * this throws — never returns a pair with a missing unitPriceId.
+ */
+async function loadExistingPair(
+  orm: BetterSQLite3Database<Record<string, never>>,
+  dedupeKey: string,
+): Promise<SaveParsedResult | null> {
+  const productRows = await orm
+    .select({ id: product.id })
+    .from(product)
+    .where(eq(product.dedupeKey, dedupeKey))
+    .limit(1);
+  const existingProductId = productRows[0]?.id;
+  if (existingProductId == null) {
+    return null;
+  }
+  const unitPriceRows = await orm
+    .select({ id: unitPrice.id })
+    .from(unitPrice)
+    .where(eq(unitPrice.productId, existingProductId))
+    .limit(1);
+  const existingUnitPriceId = unitPriceRows[0]?.id;
+  if (existingUnitPriceId == null) {
+    throw new Error(
+      `unit_price row missing for product ${existingProductId} (saveParsed writes both atomically)`,
+    );
+  }
+  return { productId: existingProductId, unitPriceId: existingUnitPriceId };
+}
+
 /** Create the typed repository over an initialized Db (from createDb). */
 export function createRepository(db: Db | null | undefined): Repository {
   if (db == null || (db.kind !== 'sqlite' && db.kind !== 'd1')) {
@@ -221,6 +256,10 @@ export function createRepository(db: Db | null | undefined): Repository {
         input.unitPriceId == null ? newId() : IdGate.parse(input.unitPriceId);
       const unitSize = encodeMeasurement(spec.unitSize);
       const totalAmount = encodeMeasurement(spec.totalAmount);
+      // dedupe_key = (rawId + normalized ParsedSpec), price-independent. The
+      // unique index on it makes the first-inserted row win; equivalent
+      // resubmits converge onto it instead of stacking duplicate product rows.
+      const dedupeKey = computeDedupeKey(rawId, spec);
       const productRow = {
         id: productId,
         rawId,
@@ -233,6 +272,7 @@ export function createRepository(db: Db | null | undefined): Repository {
         packageUnit: spec.packageUnit ?? null,
         category: spec.category,
         confidence: spec.confidence,
+        dedupeKey,
       };
       const unitPriceRow = {
         id: unitPriceId,
@@ -246,19 +286,85 @@ export function createRepository(db: Db | null | undefined): Repository {
       if (db.kind === 'sqlite') {
         // better-sqlite3 transactions are native and synchronous: the
         // callback must not await, or statements escape the tx boundary.
-        db.orm.transaction((tx) => {
-          tx.insert(product).values(productRow).run();
-          tx.insert(unitPrice).values(unitPriceRow).run();
+        // Single connection, no real concurrency — onConflictDoNothing on the
+        // dedupe_key + RunResult.changes is a safe hit/insert discriminator.
+        return db.orm.transaction((tx) => {
+          const inserted = tx
+            .insert(product)
+            .values(productRow)
+            .onConflictDoNothing({ target: product.dedupeKey })
+            .run();
+          if (inserted.changes === 1) {
+            // Real insert: persist unit_price in the same tx (first-write atomic)
+            // and return the new pair.
+            tx.insert(unitPrice).values(unitPriceRow).run();
+            return { productId, unitPriceId };
+          }
+          // Hit an existing row (changes=0): do NOT insert unit_price (would
+          // orphan onto the un-inserted product). Return the existing (oldest)
+          // pair; an existing product with no unit_price is data corruption.
+          const existingProductRows = tx
+            .select({ id: product.id })
+            .from(product)
+            .where(eq(product.dedupeKey, dedupeKey))
+            .limit(1)
+            .all();
+          const existingProductId = existingProductRows[0]?.id;
+          if (existingProductId == null) {
+            throw new Error(
+              `saveParsed: insert hit dedupe_key conflict but no product found for key (dedupe_key=${dedupeKey})`,
+            );
+          }
+          const existingUnitPriceRows = tx
+            .select({ id: unitPrice.id })
+            .from(unitPrice)
+            .where(eq(unitPrice.productId, existingProductId))
+            .limit(1)
+            .all();
+          const existingUnitPriceId = existingUnitPriceRows[0]?.id;
+          if (existingUnitPriceId == null) {
+            throw new Error(
+              `unit_price row missing for product ${existingProductId} (saveParsed writes both atomically)`,
+            );
+          }
+          return {
+            productId: existingProductId,
+            unitPriceId: existingUnitPriceId,
+          };
         });
-      } else {
+      }
+
+      // D1 driver (real concurrency). SELECT-first fast path; the bare insert
+      // inside batch() is the concurrency backstop.
+      const orm = queryOrm(db);
+      const existing = await loadExistingPair(orm, dedupeKey);
+      if (existing) {
+        return existing;
+      }
+      try {
         // D1 rejects explicit BEGIN/COMMIT; batch() is its atomic-write API
-        // (the whole group commits or rolls back together).
+        // (whole group commits or rolls back together). The product insert is
+        // BARE (no onConflictDoNothing): a concurrent racer that already
+        // committed makes this insert hit the unique index and THROW, which
+        // rolls the whole batch back (no unit_price orphan). onConflictDoNothing
+        // would swallow the conflict and leak a unit_price orphan — forbidden.
         await db.orm.batch([
           db.orm.insert(product).values(productRow),
           db.orm.insert(unitPrice).values(unitPriceRow),
         ]);
+        return { productId, unitPriceId };
+      } catch (err) {
+        // Concurrent equivalent submit won the race; our batch rolled back.
+        // Fall back to the existing (oldest) pair — the winner has committed.
+        const winner = await loadExistingPair(orm, dedupeKey);
+        if (!winner) {
+          throw new Error(
+            `saveParsed: batch insert failed but no existing product found for dedupe_key=${dedupeKey}`,
+            { cause: err },
+          );
+        }
+        return winner;
       }
-      return { productId, unitPriceId };
     },
 
     async getProduct(productId) {

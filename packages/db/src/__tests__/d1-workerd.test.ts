@@ -13,6 +13,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 interface WorkerResult {
   batchThrew: boolean;
   parentCount: number;
+  uniqueIdxBatchThrew: boolean;
+  uniqueRowCount: number;
   okBatchSuccess: boolean;
   parentAfterOk: number;
   childAfterOk: number;
@@ -37,6 +39,20 @@ export default {
       out.batchThrew = false;
     } catch (e) { out.batchThrew = true; }
     out.parentCount = (await env.DB.prepare('SELECT count(*) AS c FROM parent').first()).c;
+    // 1b) batch atomicity via a SECONDARY UNIQUE INDEX conflict (the exact
+    // mechanism the dedupe D1 path relies on: a bare insert hitting
+    // product_dedupe_key_unique inside batch() must throw + roll the group back)
+    await env.DB.prepare('CREATE TABLE u (id TEXT PRIMARY KEY, k TEXT NOT NULL)').run();
+    await env.DB.prepare('CREATE UNIQUE INDEX u_k_unique ON u (k)').run();
+    await env.DB.prepare("INSERT INTO u (id, k) VALUES ('u1','dup')").run();
+    try {
+      await env.DB.batch([
+        env.DB.prepare("INSERT INTO u (id, k) VALUES ('u2','fresh')"),
+        env.DB.prepare("INSERT INTO u (id, k) VALUES ('u3','dup')"), // secondary UNIQUE INDEX conflict
+      ]);
+      out.uniqueIdxBatchThrew = false;
+    } catch (e) { out.uniqueIdxBatchThrew = true; }
+    out.uniqueRowCount = (await env.DB.prepare('SELECT count(*) AS c FROM u').first()).c;
     // 2) successful batch: two bind-parameterized INSERTs (same shape drizzle
     // dispatches), the whole group commits
     const okBatch = await env.DB.batch([
@@ -79,6 +95,11 @@ describe('D1 platform semantics (real workerd)', () => {
 
   it('the failed batch rolled back its earlier statement (only p1 remains)', () => {
     expect(out.parentCount).toBe(1);
+  });
+
+  it('the failed batch (secondary unique-index conflict) rolled back the whole group', () => {
+    expect(out.uniqueIdxBatchThrew).toBe(true);
+    expect(out.uniqueRowCount).toBe(1); // only u1; u2 rolled back with u3
   });
 
   it('a successful batch of bind-parameterized statements commits as a group', () => {

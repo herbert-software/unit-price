@@ -57,24 +57,39 @@ export const productRaw = sqliteTable(
  * `ParsedSpec.confidence` (parse-time confidence), distinct from
  * `unit_price.confidence`.
  */
-export const product = sqliteTable('product', {
-  id: text('id').primaryKey(),
-  rawId: text('raw_id')
-    .notNull()
-    .references(() => productRaw.id),
-  unitSizeValue: real('unit_size_value'),
-  unitSizeUnit: text('unit_size_unit'),
-  quantity: real('quantity'),
-  /** JSON-text array (e.g. "[1]"); NOT NULL — core defaults to [1]. */
-  multipliers: text('multipliers').notNull(),
-  totalAmountValue: real('total_amount_value'),
-  totalAmountUnit: text('total_amount_unit'),
-  packageUnit: text('package_unit'),
-  /** Free-form category string (currently always "beverage"). */
-  category: text('category').notNull(),
-  /** ParsedSpec.confidence — parse confidence (intermediate value). */
-  confidence: real('confidence').notNull(),
-});
+export const product = sqliteTable(
+  'product',
+  {
+    id: text('id').primaryKey(),
+    rawId: text('raw_id')
+      .notNull()
+      .references(() => productRaw.id),
+    unitSizeValue: real('unit_size_value'),
+    unitSizeUnit: text('unit_size_unit'),
+    quantity: real('quantity'),
+    /** JSON-text array (e.g. "[1]"); NOT NULL — core defaults to [1]. */
+    multipliers: text('multipliers').notNull(),
+    totalAmountValue: real('total_amount_value'),
+    totalAmountUnit: text('total_amount_unit'),
+    packageUnit: text('package_unit'),
+    /** Free-form category string (currently always "beverage"). */
+    category: text('category').notNull(),
+    /** ParsedSpec.confidence — parse confidence (intermediate value). */
+    confidence: real('confidence').notNull(),
+    /**
+     * Provenance/convergence extra (like `raw_id`), NOT a domain field and
+     * not part of ParsedSpec: a deterministic key over `(raw_id + normalized
+     * ParsedSpec)`, price-independent. The unique index makes the first
+     * inserted equivalent row win ("keep the oldest"). Portable TEXT type.
+     */
+    dedupeKey: text('dedupe_key').notNull(),
+  },
+  (t) => [
+    // Dedupe convergence: one product row per `(raw_id + normalized spec)`.
+    // First successful insert wins; later equivalent rows are rejected/no-op.
+    uniqueIndex('product_dedupe_key_unique').on(t.dedupeKey),
+  ],
+);
 
 /**
  * Calculator output (`CalcResult`, not just `UnitPrice`) for a product.
