@@ -1,0 +1,9 @@
+dist/
+vendor/
+node_modules/
+project.private.config.json
+.temp/
+.cache/
+.swc/
+lib/
+*.log

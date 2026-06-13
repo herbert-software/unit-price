@@ -2,6 +2,7 @@
   "files": [],
   "references": [
     { "path": "./packages/core" },
+    { "path": "./packages/api-client" },
     { "path": "./packages/db" },
     { "path": "./packages/eval" },
     { "path": "./apps/api" }

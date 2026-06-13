@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist",
+    // `buildRankingsUrl` uses the WHATWG `URL` global to fail-fast on a non-clean
+    // origin. `URL` is a platform global available in every target runtime (Node
+    // 22, browsers, WeChat miniapp); "DOM" supplies its TYPES only — it pulls no
+    // runtime/framework package, keeping this contract package pure.
+    "lib": ["ES2022", "DOM"]
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/**/*.test.ts"],
+  "references": [{ "path": "../core" }]
+}

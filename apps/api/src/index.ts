@@ -27,15 +27,20 @@ export {
   IngestResponseSchema,
   BatchIngestRequestSchema,
   BatchIngestResponseSchema,
-  RankingsResponseSchema,
   type ContributeRequest,
   type ContributeResponse,
   type IngestResponse,
   type BatchIngestRequest,
   type BatchIngestResponse,
+} from './routes.js';
+// The rankings contract is re-exported FROM @unit-price/api-client (the shared
+// single source of truth), keeping `@unit-price/api` downstream consumers
+// unbroken while the definition lives in the transport-agnostic client package.
+export {
+  RankingsResponseSchema,
   type RankingsItem,
   type RankingsResponse,
-} from './routes.js';
+} from '@unit-price/api-client';
 export {
   orchestrate,
   type ParseResponse,
