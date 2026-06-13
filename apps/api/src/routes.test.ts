@@ -1,8 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { RawProduct } from '@unit-price/core';
+import type { ListRankingsInput, RankingRow, Repository } from '@unit-price/db';
 import { createApp } from './routes.js';
 import { buildApp } from './index.js';
-import { createNoopGovernance } from './governance.js';
+import { createNoopGovernance, createRealGovernance } from './governance.js';
 import type { Bindings } from './bindings.js';
 import type { ParseOptions, ParseResult, SpecParserLLM } from './llm.js';
 
@@ -372,5 +373,346 @@ describe('POST /parse — categoryHint passthrough', () => {
     });
     expect(res.status).toBe(200);
     expect(json.spec.category).toBe('soda');
+  });
+});
+
+// ── GET /rankings — read-only leaderboard (rankings-api spec) ───────────────
+//
+// The route is read-only: it validates the query, calls repo.listRankings, and
+// projects rows (DROP `id`, ADD `rank = offset + 1-based index`). These tests
+// inject a FAKE Repository whose listRankings serves a fixed, already-sorted
+// snapshot (the repo owns the WHERE per100ml IS NOT NULL filter + ORDER BY
+// per100ml,id slicing — covered in @unit-price/db's own tests). Here we assert
+// the HTTP contract: status codes, query validation, the rank projection, and
+// verbatim passthrough of stored per100ml/formula/confidence/warnings.
+
+/** A RankingRow fixture (only per100ml-non-null rows ever reach the route). */
+function row(over: Partial<RankingRow> & Pick<RankingRow, 'id' | 'per100ml'>): RankingRow {
+  return {
+    formula: `cents / (${over.per100ml} * 100) * 100`,
+    confidence: 0.95,
+    warnings: [],
+    title: `item-${over.id}`,
+    priceCents: 1000,
+    store: 'sam',
+    storeSku: `sku-${over.id}`,
+    sourceUrl: null,
+    ...over,
+  };
+}
+
+/**
+ * A fixed, ascending-by-(per100ml, id) snapshot. listRankings slices it by
+ * limit/offset EXACTLY as the SQL LIMIT/OFFSET would, so route-level pagination
+ * (rank continuity, no overlap/gap across pages) is exercised against a stable
+ * dataset. The two id='ml-2a'/'ml-2b' rows share per100ml=2.0 to exercise the
+ * same-value tiebreak ordering (already applied by the snapshot order here).
+ */
+const SNAPSHOT: RankingRow[] = [
+  row({ id: 'ml-1', per100ml: 0.505, formula: '40 / (330 * 24 * 1) * 100', warnings: [] }),
+  row({ id: 'ml-2a', per100ml: 2.0 }),
+  row({ id: 'ml-2b', per100ml: 2.0 }),
+  row({ id: 'ml-3', per100ml: 5.5, warnings: ['数量按单件推断为 1'], priceCents: 990 }),
+  row({ id: 'ml-4', per100ml: 889.9, warnings: ['数量按单件推断为 1'] }),
+];
+
+/**
+ * Build an app whose Repository serves `data` from listRankings, slicing by the
+ * passed limit/offset (mirroring SQL). `onCall` captures each ListRankingsInput
+ * so tests can assert the route forwarded clamped limit / parsed offset/category.
+ */
+function rankingsApp(
+  data: RankingRow[],
+  opts: { onCall?: (input: ListRankingsInput) => void; throws?: boolean } = {},
+) {
+  const listRankings = vi.fn(async (input: ListRankingsInput): Promise<RankingRow[]> => {
+    opts.onCall?.(input);
+    if (opts.throws) throw new Error('simulated read failure');
+    return data.slice(input.offset, input.offset + input.limit);
+  });
+  const repo = {
+    async upsertRaw() {
+      throw new Error('rankings is read-only: upsertRaw must not be called');
+    },
+    async saveParsed() {
+      throw new Error('rankings is read-only: saveParsed must not be called');
+    },
+    async getProduct() {
+      return null;
+    },
+    async saveCorrection() {
+      throw new Error('rankings is read-only: saveCorrection must not be called');
+    },
+    listRankings,
+  } as unknown as Repository;
+
+  const app = createApp({
+    makeLlm: () => throwingPort,
+    governance: createNoopGovernance(),
+    makeRepo: () => repo,
+  });
+  return { app, listRankings };
+}
+
+/** GET /rankings on an app, returning {res, json}. */
+async function getRankings(app: ReturnType<typeof createApp>, query = '') {
+  const res = await app.request(`/rankings${query}`, { method: 'GET' });
+  let json: any = null;
+  try {
+    json = await res.json();
+  } catch {
+    json = null;
+  }
+  return { res, json };
+}
+
+describe('GET /rankings — ascending leaderboard, verbatim stored values', () => {
+  it('returns 200, ascending per100ml, rank from 1, fields verbatim (no recompute)', async () => {
+    const { app } = rankingsApp(SNAPSHOT);
+    const { res, json } = await getRankings(app);
+    expect(res.status).toBe(200);
+    expect(Array.isArray(json)).toBe(true);
+    expect(json).toHaveLength(SNAPSHOT.length);
+    // rank is 1-based and contiguous; per100ml is non-decreasing.
+    expect(json.map((r: any) => r.rank)).toEqual([1, 2, 3, 4, 5]);
+    for (let i = 1; i < json.length; i++) {
+      expect(json[i].per100ml).toBeGreaterThanOrEqual(json[i - 1].per100ml);
+    }
+    // First item = lowest per100ml, with stored formula/per100ml verbatim.
+    expect(json[0].rank).toBe(1);
+    expect(json[0].per100ml).toBe(0.505);
+    expect(json[0].formula).toBe('40 / (330 * 24 * 1) * 100');
+    // Item shape: contract fields present, `id` NOT exposed.
+    expect(json[0]).toHaveProperty('title');
+    expect(json[0]).toHaveProperty('priceCents');
+    expect(json[0]).toHaveProperty('confidence');
+    expect(json[0]).toHaveProperty('store');
+    expect(json[0]).toHaveProperty('storeSku');
+    expect(json[0]).toHaveProperty('sourceUrl');
+    expect(json[0]).not.toHaveProperty('id');
+    // confidence is the stored unit_price band, passed through verbatim.
+    expect(json[0].confidence).toBe(0.95);
+  });
+
+  it('per100ml=null rows never appear (repo returns only non-null; response mirrors them)', async () => {
+    // The route never sees null rows (the repo's WHERE filters them); the
+    // response must contain only finite per100ml values, never null.
+    const { app } = rankingsApp(SNAPSHOT);
+    const { json } = await getRankings(app);
+    for (const item of json) {
+      expect(item.per100ml).not.toBeNull();
+      expect(typeof item.per100ml).toBe('number');
+    }
+  });
+});
+
+describe('GET /rankings — single-unit-inference warning is carried, not dropped', () => {
+  it('a row with 数量按单件推断为 1 stays in the board with its warning verbatim', async () => {
+    const { app } = rankingsApp(SNAPSHOT);
+    const { json } = await getRankings(app);
+    const inferred = json.find((r: any) => r.storeSku === 'sku-ml-3');
+    expect(inferred).toBeDefined();
+    expect(inferred.warnings).toContain('数量按单件推断为 1');
+    // The high-per100ml single-unit-inference row (889.9) is also present, not
+    // silently filtered for being a suspicious high price.
+    const high = json.find((r: any) => r.storeSku === 'sku-ml-4');
+    expect(high).toBeDefined();
+    expect(high.warnings).toContain('数量按单件推断为 1');
+  });
+});
+
+describe('GET /rankings — formula/per100ml taken from storage', () => {
+  it('per100ml=0.505 and formula equal the stored values exactly', async () => {
+    const stored = row({
+      id: 'only',
+      per100ml: 0.505,
+      formula: '40 / (330 * 24 * 1) * 100',
+    });
+    const { app } = rankingsApp([stored]);
+    const { res, json } = await getRankings(app);
+    expect(res.status).toBe(200);
+    expect(json).toHaveLength(1);
+    expect(json[0].per100ml).toBe(0.505);
+    expect(json[0].formula).toBe('40 / (330 * 24 * 1) * 100');
+  });
+});
+
+describe('GET /rankings — limit clamp', () => {
+  it('?limit=1000 clamps the forwarded LIMIT to 200 (200, never more than 200)', async () => {
+    let seen: ListRankingsInput | null = null;
+    const { app } = rankingsApp(SNAPSHOT, { onCall: (i) => (seen = i) });
+    const { res } = await getRankings(app, '?limit=1000');
+    expect(res.status).toBe(200);
+    expect(seen!.limit).toBe(200); // clamped, not 1000
+  });
+
+  it('default limit is 50 when omitted', async () => {
+    let seen: ListRankingsInput | null = null;
+    const { app } = rankingsApp(SNAPSHOT, { onCall: (i) => (seen = i) });
+    await getRankings(app);
+    expect(seen!.limit).toBe(50);
+    expect(seen!.offset).toBe(0);
+    expect(seen!.category).toBe('beverage');
+  });
+});
+
+describe('GET /rankings — invalid limit/offset -> 400 invalid-request', () => {
+  it.each([
+    ['negative limit', '?limit=-5'],
+    ['zero limit', '?limit=0'],
+    ['non-integer limit', '?limit=1.5'],
+    ['non-numeric limit', '?limit=abc'],
+    ['Infinity limit', '?limit=Infinity'],
+    ['empty limit', '?limit='],
+    ['hex limit', '?limit=0x10'],
+    ['whitespace limit', '?limit=%20%205'],
+    ['negative offset', '?offset=-1'],
+    ['non-numeric offset', '?offset=abc'],
+    ['non-integer offset', '?offset=2.5'],
+    ['decimal offset', '?offset=1.5'],
+    ['empty offset', '?offset='],
+  ])('%s -> 400 invalid-request (never 200, never silent default)', async (_name, query) => {
+    const { app, listRankings } = rankingsApp(SNAPSHOT);
+    const { res, json } = await getRankings(app, query);
+    expect(res.status).toBe(400);
+    expect(json.error).toBe('invalid-request');
+    // 400 fires before the repo is queried.
+    expect(listRankings).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /rankings — out-of-range offset -> 200 + []', () => {
+  it('?offset=0 (boundary) returns 200 (offset 0 is valid, not rejected)', async () => {
+    const { app } = rankingsApp(SNAPSHOT);
+    const { res } = await getRankings(app, '?offset=0');
+    expect(res.status).toBe(200);
+  });
+
+  it('?offset=100000 returns 200 and an empty array (not 404)', async () => {
+    const { app } = rankingsApp(SNAPSHOT);
+    const { res, json } = await getRankings(app, '?offset=100000');
+    expect(res.status).toBe(200);
+    expect(json).toEqual([]);
+  });
+});
+
+describe('GET /rankings — unknown/non-exact category -> 400', () => {
+  it.each([
+    ['unsupported category', '?category=alcohol'],
+    ['wrong case', '?category=Beverage'],
+    ['empty string', '?category='],
+  ])('%s -> 400 invalid-request (only exact lowercase beverage admitted)', async (_name, query) => {
+    const { app, listRankings } = rankingsApp(SNAPSHOT);
+    const { res, json } = await getRankings(app, query);
+    expect(res.status).toBe(400);
+    expect(json.error).toBe('invalid-request');
+    expect(listRankings).not.toHaveBeenCalled();
+  });
+
+  it('?category=beverage (exact) is admitted -> 200', async () => {
+    const { app } = rankingsApp(SNAPSHOT);
+    const { res } = await getRankings(app, '?category=beverage');
+    expect(res.status).toBe(200);
+  });
+});
+
+describe('GET /rankings — empty library -> 200 + []', () => {
+  it('no per100ml-non-null rows returns 200 and [] (not an error)', async () => {
+    const { app } = rankingsApp([]);
+    const { res, json } = await getRankings(app);
+    expect(res.status).toBe(200);
+    expect(json).toEqual([]);
+  });
+});
+
+describe('GET /rankings — same per100ml stable pagination (one snapshot)', () => {
+  it('two pages (offset 0 / offset N) cover the same-value rows without overlap or gaps', async () => {
+    // limit=2 splits the 5-row snapshot into [0,2) / [2,4) / [4,5). The two
+    // per100ml=2.0 rows (ml-2a, ml-2b) straddle pages 1 and 2; stable ordering
+    // means page1 ends with ml-2a and page2 begins with ml-2b — no repeat, no
+    // skip. Ranks must be globally contiguous across the page boundary.
+    const { app } = rankingsApp(SNAPSHOT);
+    const page1 = (await getRankings(app, '?limit=2&offset=0')).json;
+    const page2 = (await getRankings(app, '?limit=2&offset=2')).json;
+    const page3 = (await getRankings(app, '?limit=2&offset=4')).json;
+
+    expect(page1.map((r: any) => r.rank)).toEqual([1, 2]);
+    expect(page2.map((r: any) => r.rank)).toEqual([3, 4]);
+    expect(page3.map((r: any) => r.rank)).toEqual([5]);
+
+    // Reassembled storeSku order is the full snapshot, each row exactly once.
+    const reassembled = [...page1, ...page2, ...page3].map((r: any) => r.storeSku);
+    expect(reassembled).toEqual(SNAPSHOT.map((r) => `sku-${r.id}`));
+    // No id collides across pages (no overlap), and the count matches (no gaps).
+    expect(new Set(reassembled).size).toBe(SNAPSHOT.length);
+  });
+});
+
+describe('GET /rankings — read failure -> 500 persistence-error', () => {
+  it('listRankings throwing maps to 500 persistence-error (no recompute, no retry)', async () => {
+    const { app } = rankingsApp(SNAPSHOT, { throws: true });
+    const { res, json } = await getRankings(app, '?category=beverage');
+    expect(res.status).toBe(500);
+    expect(json.error).toBe('persistence-error');
+  });
+});
+
+// ── GET /rankings — governance exemption (api-governance delta) ─────────────
+describe('GET /rankings — governance-exempt public endpoint (4.2)', () => {
+  /** A KV that records every get/put so we can prove rankings never touches it. */
+  function spyKv() {
+    const get = vi.fn(async () => null);
+    const put = vi.fn(async () => undefined);
+    return { get, put, kv: { get, put } as unknown as Bindings['GOVERNANCE_KV'] };
+  }
+
+  /** App with REAL governance + a fake read-only repo, env injected per request. */
+  function govApp(env: Bindings) {
+    const listRankings = vi.fn(async (input: ListRankingsInput) =>
+      SNAPSHOT.slice(input.offset, input.offset + input.limit),
+    );
+    const repo = {
+      async upsertRaw() {
+        throw new Error('read-only');
+      },
+      async saveParsed() {
+        throw new Error('read-only');
+      },
+      async getProduct() {
+        return null;
+      },
+      async saveCorrection() {
+        throw new Error('read-only');
+      },
+      listRankings,
+    } as unknown as Repository;
+    const app = createApp({
+      makeLlm: () => throwingPort,
+      governance: createRealGovernance(),
+      makeRepo: () => repo,
+    });
+    return (path: string) => app.request(path, { method: 'GET' }, env);
+  }
+
+  it('GET /rankings without a key -> 200, and NO rate-limit/usage write to GOVERNANCE_KV', async () => {
+    const { get, put, kv } = spyKv();
+    // API_KEYS present (real governance configured) — yet /rankings must NOT
+    // engage auth/rate/usage at all (governance-exempt, like /health).
+    const request = govApp({ API_KEYS: 'key-alpha', GOVERNANCE_KV: kv });
+    const res = await request('/rankings');
+    expect(res.status).toBe(200);
+    // No auth challenge, and zero KV access (no rl:/usage: counters written).
+    expect(res.status).not.toBe(401);
+    expect(res.status).not.toBe(403);
+    expect(get).not.toHaveBeenCalled();
+    expect(put).not.toHaveBeenCalled();
+  });
+
+  it('exemption does not leak: a protected endpoint (/parse) still 401 auth-missing', async () => {
+    const { kv } = spyKv();
+    const request = govApp({ API_KEYS: 'key-alpha', GOVERNANCE_KV: kv });
+    const res = await request('/parse'); // GET (no key) — auth fires first
+    expect(res.status).toBe(401);
+    expect((await res.json()).error).toBe('auth-missing');
   });
 });

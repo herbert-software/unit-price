@@ -16,7 +16,7 @@ import {
   type ParsedSpec,
   type RawProduct,
 } from '@unit-price/core';
-import { eq, sql } from 'drizzle-orm';
+import { asc, eq, isNotNull, sql } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { z } from 'zod';
 import {
@@ -155,6 +155,54 @@ export interface ProductRecord {
   calc: CalcResult;
 }
 
+export interface ListRankingsInput {
+  /** Page size (caller is responsible for clamping; passed straight to LIMIT). */
+  limit: number;
+  /** Row offset (passed straight to OFFSET). */
+  offset: number;
+  /**
+   * v2-reserved category filter. In v1 this is NOT pushed down to SQL (it is a
+   * no-op since product.category is always "beverage", and pushing it down
+   * makes the planner abandon unit_price_per100ml_idx). API-layer validation
+   * enforces category=beverage; the query ignores this value in v1.
+   */
+  category: string;
+}
+
+/**
+ * Denormalized read-only ranking projection (`unit_price ⋈ product ⋈
+ * product_raw`). NOT a domain object (ParsedSpec/CalcResult): the per100ml/
+ * formula/confidence/warnings columns are taken verbatim from `unit_price`
+ * (never recomputed from the stored cents), and the row carries display columns
+ * from `product_raw`. `confidence` is `unit_price.confidence` (the authoritative
+ * band) — never `product.confidence` (the parse-time intermediate). `warnings`
+ * is decoded from JSON-text and re-validated to `string[]` before it leaves the
+ * repo (the raw JSON string is never exposed). The API-layer contract schema
+ * (RankingsResponseSchema) validates this projection, not a core Zod schema.
+ */
+export interface RankingRow {
+  /** unit_price.id (the stable secondary sort key). */
+  id: string;
+  /** unit_price.per100ml (REAL; non-null by the WHERE filter). */
+  per100ml: number;
+  /** unit_price.formula (stored replay string). */
+  formula: string;
+  /** unit_price.confidence (authoritative band) — NOT product.confidence. */
+  confidence: number;
+  /** unit_price.warnings decoded from JSON-text to string[]. */
+  warnings: string[];
+  /** product_raw.title. */
+  title: string;
+  /** product_raw.price as integer cents (latest observed price). */
+  priceCents: number;
+  /** product_raw.store. */
+  store: string;
+  /** product_raw.store_sku. */
+  storeSku: string;
+  /** product_raw.source_url (nullable). */
+  sourceUrl: string | null;
+}
+
 export interface Repository {
   /** Upsert a raw report by `(store, store_sku)`; returns the raw row id. */
   upsertRaw(input: UpsertRawInput): Promise<string>;
@@ -164,6 +212,15 @@ export interface Repository {
   getProduct(productId: string): Promise<ProductRecord | null>;
   /** Append a correction row; never mutates product_raw/product. */
   saveCorrection(input: SaveCorrectionInput): Promise<string>;
+  /**
+   * Read-only ranking query: per100ml-non-null rows joined across
+   * unit_price ⋈ product ⋈ product_raw, ascending by per100ml then unit_price.id,
+   * sliced by limit/offset. v1 does NOT filter by category (the input is a
+   * v2-reserved no-op; see ListRankingsInput.category). Pure read — no writes,
+   * no parse/calc, no recompute. Stored per100ml/formula/confidence are returned
+   * verbatim; warnings are decoded to string[].
+   */
+  listRankings(input: ListRankingsInput): Promise<RankingRow[]>;
 }
 
 /**
@@ -174,6 +231,47 @@ export interface Repository {
  */
 function queryOrm(db: Db): BetterSQLite3Database<Record<string, never>> {
   return db.orm as unknown as BetterSQLite3Database<Record<string, never>>;
+}
+
+/**
+ * Single source for the v1 ranking query (shared by listRankings and the
+ * EXPLAIN query-plan test). The test obtains its SQL via `.toSQL()` on this same
+ * builder so the plan assertion runs against the production query — never a
+ * hand-rebuilt copy that could silently drift from the JOIN/WHERE/ORDER here.
+ * See listRankings for the WHERE/ORDER/category-no-op rationale.
+ */
+export function buildRankingsQuery(
+  orm: BetterSQLite3Database<Record<string, never>>,
+  input: ListRankingsInput,
+) {
+  return orm
+    .select({
+      id: unitPrice.id,
+      per100ml: unitPrice.per100ml,
+      formula: unitPrice.formula,
+      confidence: unitPrice.confidence,
+      warnings: unitPrice.warnings,
+      title: productRaw.title,
+      priceCents: productRaw.price,
+      store: productRaw.store,
+      storeSku: productRaw.storeSku,
+      sourceUrl: productRaw.sourceUrl,
+    })
+    .from(unitPrice)
+    // product join is the unit_price → product_raw bridge (no columns
+    // taken from it); kept so the projection can reach product_raw.
+    .innerJoin(product, eq(product.id, unitPrice.productId))
+    .innerJoin(productRaw, eq(productRaw.id, product.rawId))
+    // v1 does NOT push down `category`: product.category is always
+    // "beverage", so the equality predicate is a no-op AND it makes the
+    // SQLite planner drive from `product` (full SCAN + TEMP B-TREE) and
+    // abandon unit_price_per100ml_idx. The API layer already validates
+    // category=beverage; v2 (real categories) pushes the predicate down
+    // and pairs it with a composite (category, per100ml, id) index.
+    .where(isNotNull(unitPrice.per100ml))
+    .orderBy(asc(unitPrice.per100ml), asc(unitPrice.id))
+    .limit(input.limit)
+    .offset(input.offset);
 }
 
 /**
@@ -468,6 +566,38 @@ export function createRepository(db: Db | null | undefined): Repository {
           createdAt: toEpochMillis(input.createdAt ?? Date.now()),
         });
       return id;
+    },
+
+    async listRankings(input) {
+      const orm = queryOrm(db);
+      // Read-only projection. confidence is taken explicitly from unit_price
+      // (the authoritative band) — product also has a `confidence` column
+      // (parse-time intermediate) and must NOT be selected here. per100ml/
+      // formula/confidence are stored values, never recomputed from the cents
+      // price. The WHERE keeps only per100ml-non-null rows (volume axis);
+      // ORDER BY per100ml ASC walks unit_price_per100ml_idx, and the same-table
+      // unit_price.id tiebreak makes same-value pages stable. Slicing is in SQL
+      // (LIMIT/OFFSET) — rows are never pulled into app memory to sort. The
+      // query is built by the shared buildRankingsQuery so the EXPLAIN test runs
+      // against this exact SQL (no drift).
+      const rows = await buildRankingsQuery(orm, input);
+
+      return rows.map((row) => ({
+        // per100ml is non-null by the WHERE filter; the column type is
+        // `number | null`, so narrow it here without recomputing.
+        id: row.id,
+        per100ml: row.per100ml as number,
+        formula: row.formula as string,
+        confidence: row.confidence,
+        // warnings is JSON-text: decode (codec, symmetric to encodeJson) then
+        // re-validate to string[] — the raw JSON string is never exposed.
+        warnings: WarningsSchema.parse(decodeJson(row.warnings)),
+        title: row.title,
+        priceCents: row.priceCents,
+        store: row.store,
+        storeSku: row.storeSku,
+        sourceUrl: row.sourceUrl,
+      }));
     },
   };
 }

@@ -130,6 +130,97 @@ export const BatchIngestResponseSchema = z.object({
 
 export type BatchIngestResponse = z.infer<typeof BatchIngestResponseSchema>;
 
+/**
+ * One ranking row in the GET /rankings response. Every field is a PROJECTION of
+ * a stored column read from `unit_price ⋈ product ⋈ product_raw` — the read path
+ * NEVER recomputes (per the rankings-api spec / D1). `rank` is the only computed
+ * field: assigned at read time as `offset + 1-based row index`, not persisted.
+ *
+ * Field shapes track the source columns:
+ *  - `title`/`store`/`storeSku` are NON-empty (`product_raw` NOT NULL columns) —
+ *    `z.string().min(1)`, never optional.
+ *  - `sourceUrl` is nullable (`product_raw.source_url` is a nullable column).
+ *  - `formula` is a non-empty string (NOT nullable): an in-ranking row has
+ *    `per100ml IS NOT NULL`, and the persistence CalcResultGate invariant
+ *    ("formula non-empty ⟺ per100ml/per100g one is non-empty") makes formula
+ *    necessarily non-empty here.
+ *  - `priceCents` is the integer cents from `product_raw.price` (raw observation,
+ *    NOT converted to yuan / no float currency math on the server).
+ *  - `confidence` is `unit_price.confidence` (the final authoritative band), NOT
+ *    `product.confidence` (a parse-time intermediate).
+ *  - `warnings` reuses core's `WarningsSchema` (`string[]`), the same shape the
+ *    write path stores; passed through verbatim (single-unit-inference warnings
+ *    are NOT silently dropped).
+ */
+export const RankingsItemSchema = z.object({
+  rank: z.number().int().min(1),
+  title: z.string().min(1),
+  priceCents: z.number().int(),
+  per100ml: z.number(),
+  formula: z.string().min(1),
+  confidence: z.number(),
+  warnings: WarningsSchema,
+  store: z.string().min(1),
+  storeSku: z.string().min(1),
+  sourceUrl: z.string().nullable(),
+});
+
+export type RankingsItem = z.infer<typeof RankingsItemSchema>;
+
+/**
+ * GET /rankings response body: a bare array of ranking rows, already sorted by
+ * `per100ml` ascending (cheapest real unit price first). An empty array is the
+ * valid response for an empty library or an out-of-range `offset` (a 200, never
+ * a 404). Validated before send to keep the contract honest.
+ */
+export const RankingsResponseSchema = z.array(RankingsItemSchema);
+
+export type RankingsResponse = z.infer<typeof RankingsResponseSchema>;
+
+/**
+ * GET /rankings query parameters. Query values arrive as strings. `limit` and
+ * `offset` accept ONLY a decimal non-negative integer string (STRICT, symmetric):
+ * a present value is gated by `^\d+$` BEFORE numeric conversion, so loose coercion
+ * (`Number("")=0`, `Number("0x10")=16`, `Number(" 5 ")=5`) can never sneak a
+ * non-canonical input past validation. Only a MISSING key falls through to the
+ * default. A parse failure maps to `400 invalid-request` at the route.
+ *
+ * `limit`: default 50 (key missing). Present: `^\d+$` → int → `positive` (rejects
+ * `0`); the clamp to 200 comes AFTER the positive check (a present `>200` clamps,
+ * never rejects). Empty string / hex / whitespace / decimal / negative / `abc` /
+ * `Infinity` all fail the regex or the int/positive pipe → 400.
+ *
+ * `offset`: default 0 (key missing). Present: `^\d+$` → int → `nonnegative`
+ * (allows `0`) — SAME strictness as `limit` (symmetry: empty `offset` is rejected
+ * just like empty `limit`, not silently treated as 0). A valid in-range-but-past-
+ * the-end offset is a route-level concern (→ 200 + []), not a parse failure.
+ *
+ * `category`: `z.enum(['beverage'])` (CASE-SENSITIVE), default `beverage`. An
+ * empty string `?category=` parses to `""`, which is NOT in the enum → rejected
+ * (→ 400). This is a spelling guard + future-category placeholder; v1 in-ranking
+ * eligibility is `per100ml IS NOT NULL`, not this field.
+ */
+export const RankingsQuerySchema = z.object({
+  limit: z
+    .string()
+    .regex(/^\d+$/)
+    .transform(Number)
+    .pipe(z.number().int().positive())
+    .transform((n) => Math.min(n, 200))
+    .optional()
+    .transform((n) => n ?? 50),
+  offset: z
+    .string()
+    .regex(/^\d+$/)
+    .transform(Number)
+    .pipe(z.number().int().nonnegative())
+    .optional()
+    .transform((n) => n ?? 0),
+  category: z.enum(['beverage']).default('beverage'),
+});
+
+export type RankingsQuery = z.infer<typeof RankingsQuerySchema>;
+
 export interface AppDeps {
   /**
    * Factory that builds an LLM port from the per-request injected env. Building
@@ -293,6 +384,76 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   // /health is exempt from the entire governance chain (auth + rate + usage),
   // so liveness probes can hit it keyless and high-frequency.
   app.get('/health', (c) => c.json({ ok: true }));
+
+  // GET /rankings — public read-only leaderboard. Like /health, it is EXEMPT
+  // from the governance chain: NO `app.use('/rankings', …)` is mounted, so it
+  // takes no API key, consumes no rate-limit slot, and records no usage (the
+  // protected set is exactly {/parse, /contribute, /ingest, /ingest/batch}).
+  // Hono matches `app.use(...)` by exact path, so the protected endpoints'
+  // middleware never wraps this route. The handler is strictly READ-ONLY:
+  // it validates the query, calls repo.listRankings, projects rows (assigning
+  // `rank = offset + 1-based index`), and returns — no write, no LLM, no
+  // background task.
+  app.get('/rankings', async (c) => {
+    // ── Validate query params. Values arrive as strings; RankingsQuerySchema
+    //    coerces/clamps limit, validates offset, and enforces category=beverage
+    //    (case-sensitive). Any failure → 400 invalid-request, same shape/code as
+    //    the other endpoints. An out-of-range (but valid) offset is NOT a parse
+    //    failure — it falls through to listRankings, which returns [] (→ 200).
+    const parsedQuery = RankingsQuerySchema.safeParse(c.req.query());
+    if (!parsedQuery.success) {
+      return c.json(
+        {
+          error: 'invalid-request',
+          message: 'request query failed validation',
+          issues: parsedQuery.error.issues.map((i) => ({ path: i.path, message: i.message })),
+        },
+        400,
+      );
+    }
+    const { limit, offset, category } = parsedQuery.data;
+
+    // ── Resolve the repository (shared helper; null/throw → 500 persistence-
+    //    error). Read-only — no write path is reachable from here.
+    const resolved = resolveRepo(c, deps);
+    if (!resolved.ok) return resolved.response;
+    const repo = resolved.value;
+
+    // ── Read the ascending per100ml slice. v1 does NOT push category to SQL
+    //    (no-op + index-preserving); it is passed through for the v2-reserved
+    //    signature. A throw → 500 persistence-error (no recompute, no retry).
+    let rows: Awaited<ReturnType<Repository['listRankings']>>;
+    try {
+      rows = await repo.listRankings({ limit, offset, category });
+    } catch {
+      return c.json({ error: 'persistence-error', message: 'failed to read rankings' }, 500);
+    }
+
+    // ── Project RankingRow[] → RankingsItem[]: DROP `id` (the same-table
+    //    tiebreak key, not part of the contract) and ADD `rank = offset + 1-based
+    //    index`. per100ml/formula/confidence/warnings are taken verbatim from the
+    //    stored row (never recomputed). An out-of-range offset yields [] → 200.
+    const items = rows.map((row, i) => ({
+      rank: offset + i + 1,
+      title: row.title,
+      priceCents: row.priceCents,
+      per100ml: row.per100ml,
+      formula: row.formula,
+      confidence: row.confidence,
+      warnings: row.warnings,
+      store: row.store,
+      storeSku: row.storeSku,
+      sourceUrl: row.sourceUrl,
+    }));
+
+    // ── Validate the response shape before returning (contract enforcement,
+    //    mirrors /parse + /contribute). Failure → 500 internal.
+    const validated = RankingsResponseSchema.safeParse(items);
+    if (!validated.success) {
+      return c.json({ error: 'internal', message: 'response failed validation' }, 500);
+    }
+    return c.json(validated.data, 200);
+  });
 
   // Governance runs only on /parse, before the business handler. Order inside
   // the middleware: auth → rate-limit → usage → next().

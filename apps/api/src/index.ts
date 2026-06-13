@@ -27,11 +27,14 @@ export {
   IngestResponseSchema,
   BatchIngestRequestSchema,
   BatchIngestResponseSchema,
+  RankingsResponseSchema,
   type ContributeRequest,
   type ContributeResponse,
   type IngestResponse,
   type BatchIngestRequest,
   type BatchIngestResponse,
+  type RankingsItem,
+  type RankingsResponse,
 } from './routes.js';
 export {
   orchestrate,
