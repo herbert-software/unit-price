@@ -25,7 +25,7 @@ import {
   type StoreMapResult,
 } from '@unit-price/core';
 import { product, productRaw, type Db, type Repository } from '@unit-price/db';
-import { eq } from 'drizzle-orm';
+import { asc, eq, gt } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 
 /** One product's tagging input (raw title + store-native category for lookup). */
@@ -168,7 +168,22 @@ export interface BackfillResult {
   rankable: number;
   /** Per-product results (in processing order). */
   results: TagProductResult[];
+  /** keyset 续跑游标:本次读到行数 < limit(耗尽)或无参全量 → null;否则 = 本块最大已处理 product.id(严格 > 入参 cursor)。 */
+  nextCursor: string | null;
 }
+
+/**
+ * admin backfill 单块 limit 的服务端上界,从 Cloudflare Worker FREE-plan 子请求
+ * 上限(50/请求;见 routes.ts MAX_BATCH=40 注释纪律)派生。每商品 tagProduct 约
+ * 5–9 次 D1 子请求:resolveComparableUnit 沿 is-a 树逐级上行找最近非空
+ * comparable_unit(每级一读) + reconcileCategory 的 product 存在性读 +
+ * loadCategoryLeafTagIds + 每 leaf/pending/属性 slug 的 loadTagBySlug + 末尾 batch。
+ * 预算:1(列表读) + limit × 9 ≤ 50 ⇒ limit ≤ 5。**临时值、待实测定稿**;实测每商品
+ * 最坏 >9 则下调;升高须先确认生产 Worker 为 PAID(1000 子请求),对齐 MAX_BATCH 纪律。
+ * 不得在实测前把 5 当 load-bearing。
+ */
+export const ADMIN_BACKFILL_DEFAULT_LIMIT = 5;
+export const ADMIN_BACKFILL_MAX_LIMIT = 5;
 
 /**
  * Read every product joined to its raw row (id + title + store) for the backfill.
@@ -185,19 +200,33 @@ export interface BackfillResult {
  * store-native-category-id field (must NOT reuse category_hint — that would
  * pollute product.category). Both drivers share the sqlite-core query-builder
  * surface for this non-transactional read (mirrors repository.ts / seed.ts).
+ *
+ * 现支持 keyset 游标分页(cursor/limit)+ 全序读:始终 ORDER BY product.id(确定性
+ * 全序,text 列按字典序);有 cursor 时下推 WHERE product.id > :cursor(无 cursor
+ * 从头),有 limit 时 LIMIT :limit。
  */
 export async function listProductsForBackfill(
   db: Db,
+  opts?: { cursor?: string; limit?: number },
 ): Promise<TagProductInput[]> {
   const orm = db.orm as unknown as BetterSQLite3Database<Record<string, never>>;
-  const rows = await orm
+  let query = orm
     .select({
       productId: product.id,
       title: productRaw.title,
       store: productRaw.store,
     })
     .from(product)
-    .innerJoin(productRaw, eq(productRaw.id, product.rawId));
+    .innerJoin(productRaw, eq(productRaw.id, product.rawId))
+    .$dynamic()
+    .orderBy(asc(product.id));
+  if (opts?.cursor != null) {
+    query = query.where(gt(product.id, opts.cursor));
+  }
+  if (opts?.limit != null) {
+    query = query.limit(opts.limit);
+  }
+  const rows = await query;
   return rows.map((r) => ({
     productId: r.productId,
     title: r.title,
@@ -224,8 +253,9 @@ export async function listProductsForBackfill(
 export async function runBackfill(
   repo: Repository,
   db: Db,
+  opts?: { cursor?: string; limit?: number },
 ): Promise<BackfillResult> {
-  const inputs = await listProductsForBackfill(db);
+  const inputs = await listProductsForBackfill(db, opts);
   const results: TagProductResult[] = [];
   let classified = 0;
   let pending = 0;
@@ -239,6 +269,19 @@ export async function runBackfill(
     else manual += 1;
     if (result.rankable) rankableCount += 1;
   }
+  // keyset 续跑游标:无参全量(limit 缺省)→ null;读到行数 < limit(游标耗尽)→
+  // null;否则 = 本块最大已处理 product.id。因 orderBy asc + where id>cursor +
+  // 块非空,本块最大 id 必严格 > 入参 cursor(单调前进、不原地踏步)。
+  const limit = opts?.limit;
+  const last = inputs[inputs.length - 1];
+  let nextCursor: string | null;
+  if (limit == null) {
+    nextCursor = null;
+  } else if (inputs.length < limit || last == null) {
+    nextCursor = null;
+  } else {
+    nextCursor = last.productId;
+  }
   return {
     total: inputs.length,
     classified,
@@ -246,5 +289,6 @@ export async function runBackfill(
     manual,
     rankable: rankableCount,
     results,
+    nextCursor,
   };
 }

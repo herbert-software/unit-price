@@ -2,8 +2,10 @@
 #
 # Resource ids are placeholders: [手动验证] 由 task 4.1 开通后填入；禁明文密钥。
 # Secrets (OPENROUTER_API_KEY / API_KEYS) are NOT declared here — they are set
-# out-of-band via `wrangler secret put`, per environment. CLOUDFLARE_API_TOKEN
-# is a CI Actions secret. Nothing secret belongs in this file.
+# out-of-band via `wrangler secret put`, per environment. The admin tier secrets
+# ADMIN_API_KEYS / AUDIT_LOG_HMAC_SECRET are likewise set via `wrangler secret
+# put` and never written to this file. CLOUDFLARE_API_TOKEN is a CI Actions
+# secret. Nothing secret belongs in this file.
 #
 # Path baseline: wrangler resolves `migrations_dir` relative to THIS file's
 # directory (apps/api/). All wrangler invocations (local and CI) must pass

@@ -9,11 +9,17 @@ import { Hono, type Context } from 'hono';
 import { z } from 'zod';
 import { ParsedSpecSchema, UnitPriceSchema, WarningsSchema, type RawProduct } from '@unit-price/core';
 import { RankingsResponseSchema } from '@unit-price/api-client';
-import type { Repository } from '@unit-price/db';
+import type { Db, Repository } from '@unit-price/db';
 import { orchestrate } from './orchestrate.js';
 import type { SpecParserLLM } from './llm.js';
 import type { AppEnv, Bindings } from './bindings.js';
-import { governanceMiddleware, type Governance } from './governance.js';
+import {
+  authOnlyMiddleware,
+  createRealGovernance,
+  governanceMiddleware,
+  type Governance,
+} from './governance.js';
+import { runBackfill, ADMIN_BACKFILL_DEFAULT_LIMIT, ADMIN_BACKFILL_MAX_LIMIT } from './tagging.js';
 
 /** Request schema: title non-empty string, price a finite number, optional hint. */
 export const ParseRequestSchema = z.object({
@@ -184,6 +190,18 @@ export const RankingsQuerySchema = z.object({
 
 export type RankingsQuery = z.infer<typeof RankingsQuerySchema>;
 
+export const AdminBackfillQuerySchema = z.object({
+  cursor: z.string().min(1).optional(),
+  limit: z
+    .string()
+    .regex(/^\d+$/)
+    .transform(Number)
+    .pipe(z.number().int().positive())
+    .transform((n) => Math.min(n, ADMIN_BACKFILL_MAX_LIMIT))
+    .optional()
+    .transform((n) => Math.min(n ?? ADMIN_BACKFILL_DEFAULT_LIMIT, ADMIN_BACKFILL_MAX_LIMIT)),
+});
+
 export interface AppDeps {
   /**
    * Factory that builds an LLM port from the per-request injected env. Building
@@ -207,6 +225,10 @@ export interface AppDeps {
    * null and the throw map to a 500 persistence-error at the route).
    */
   makeRepo?: (env: Bindings) => Repository | null;
+  /** Db 工厂(镜像 makeRepo),供 admin backfill 游标读。null→persistence-error。 */
+  makeDb?: (env: Bindings) => Db | null;
+  /** admin-tier authenticate-only governance(读 ADMIN_API_KEYS)。省略时默认 createRealGovernance({allowlistVar:'ADMIN_API_KEYS'})。 */
+  adminGovernance?: Governance;
   /**
    * Injectable "background execution" port for /ingest's post-response work
    * (orchestrate + saveParsed), same paradigm as makeLlm/makeRepo/governance.
@@ -339,6 +361,14 @@ async function landRaw(
     };
   }
   return { ok: true, value: rawId };
+}
+
+/** admin key 的审计标识:HMAC-SHA256(key, secret) hex 截断。绝不落原文 key。 */
+async function hmacKeyId(key: string, secret: string): Promise<string> {
+  const enc = new TextEncoder();
+  const ck = await crypto.subtle.importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const sig = await crypto.subtle.sign('HMAC', ck, enc.encode(key));
+  return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 16);
 }
 
 export function createApp(deps: AppDeps): Hono<AppEnv> {
@@ -779,6 +809,58 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
       return c.json({ error: 'internal', message: 'response failed validation' }, 500);
     }
     return c.json(validated.data, 202);
+  });
+
+  // POST /admin/backfill — admin-tier taxonomy backfill 驱动。挂专用 authenticate-
+  // only admin gate(独立 ADMIN_API_KEYS;**非**公共 governanceMiddleware → 不跑
+  // rate/usage)。Hono 精确路径:每个 /admin/* 各自挂 gate(无前缀 catch-all)。
+  const adminGov = deps.adminGovernance ?? createRealGovernance({ allowlistVar: 'ADMIN_API_KEYS' });
+  app.use('/admin/backfill', authOnlyMiddleware(adminGov));
+  app.post('/admin/backfill', async (c) => {
+    const parsed = AdminBackfillQuerySchema.safeParse(c.req.query());
+    if (!parsed.success) {
+      return c.json({ error: 'invalid-request', message: 'invalid cursor/limit', issues: parsed.error.issues.map((i) => ({ path: i.path, message: i.message })) }, 400);
+    }
+    const { cursor, limit } = parsed.data;
+
+    const resolved = resolveRepo(c, deps);
+    if (!resolved.ok) return resolved.response;
+    const repo = resolved.value;
+
+    let db: Db | null;
+    try { db = deps.makeDb?.(c.env) ?? null; } catch { db = null; }
+    if (db === null) return c.json({ error: 'persistence-error', message: 'no database bound' }, 500);
+
+    // 审计:keyed-哈希 admin key(原文绝不落日志);adminKey 由 authenticate-only gate 放行时设。
+    // secret 缺失则 fail-close — 审计 keying 是必需项,绝不降级到源码常量 salt。
+    const auditSecret = c.env.AUDIT_LOG_HMAC_SECRET;
+    if (!auditSecret) {
+      console.warn('[admin/backfill] AUDIT_LOG_HMAC_SECRET unconfigured — refusing (audit keying required)');
+      return c.json({ error: 'config-error', message: 'service configuration error' }, 500);
+    }
+    const adminKey = c.get('adminKey') ?? '';
+    const keyHash = await hmacKeyId(adminKey, auditSecret);
+
+    let result;
+    try {
+      result = await runBackfill(repo, db, { cursor, limit });
+    } catch {
+      console.warn('[admin/backfill] failed', { keyHash, cursor: cursor ?? null, limit });
+      return c.json({ error: 'persistence-error', message: 'backfill failed' }, 500);
+    }
+
+    console.warn('[admin/backfill]', {
+      keyHash, cursor: cursor ?? null, limit,
+      total: result.total, classified: result.classified, pending: result.pending,
+      manual: result.manual, rankable: result.rankable, nextCursor: result.nextCursor,
+      at: new Date().toISOString(),
+    });
+
+    // 响应:只回计数 + nextCursor(投影掉 results[])。
+    return c.json({
+      total: result.total, classified: result.classified, pending: result.pending,
+      manual: result.manual, rankable: result.rankable, nextCursor: result.nextCursor,
+    });
   });
 
   return app;

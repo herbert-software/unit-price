@@ -431,7 +431,7 @@ describe('POST /contribute — error body carries rawId (5.8)', () => {
 });
 
 describe('POST /contribute — non-target boundary (5.9)', () => {
-  it('routes are exactly {/health, /rankings, /parse, /contribute, /ingest, /ingest/batch} — no corrections/compare', async () => {
+  it('routes are exactly {/admin/backfill, /health, /rankings, /parse, /contribute, /ingest, /ingest/batch} — no corrections/compare', async () => {
     const app = createApp({
       makeLlm: () => throwingPort,
       governance: createNoopGovernance(),
@@ -439,9 +439,11 @@ describe('POST /contribute — non-target boundary (5.9)', () => {
     });
     const paths = [...new Set(app.routes.map((r) => r.path))].sort();
     // /rankings is the public read-only leaderboard added by add-rankings-endpoint
-    // (governance-exempt, registered alongside /health). corrections/compare are
-    // still future (v2) and must NOT exist yet.
-    expect(paths).toEqual(['/contribute', '/health', '/ingest', '/ingest/batch', '/parse', '/rankings']);
+    // (governance-exempt, registered alongside /health). /admin/backfill is the
+    // admin-tier taxonomy backfill driver (its own ADMIN_API_KEYS gate, not the
+    // public governance chain). corrections/compare are still future (v2) and
+    // must NOT exist yet.
+    expect(paths).toEqual(['/admin/backfill', '/contribute', '/health', '/ingest', '/ingest/batch', '/parse', '/rankings']);
     expect(paths).not.toContain('/corrections');
     expect(paths).not.toContain('/compare');
   });
