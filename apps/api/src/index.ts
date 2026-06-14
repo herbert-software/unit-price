@@ -5,7 +5,7 @@
 // the app builds even without OPENROUTER_API_KEY. A genuinely missing key only
 // surfaces as a distinguishable runtime config-error if a request reaches tier2.
 import type { RawProduct } from '@unit-price/core';
-import { createDb, createRepository, type Repository } from '@unit-price/db';
+import { createDb, createRepository, type Db, type Repository } from '@unit-price/db';
 import type { Bindings } from './bindings.js';
 import { ConfigError, loadLlmConfig } from './config.js';
 import { AiSdkSpecParser, type ParseOptions, type ParseResult, type SpecParserLLM } from './llm.js';
@@ -116,6 +116,10 @@ export const defaultMakeLlm = (env: Bindings): SpecParserLLM => new LazySpecPars
 export const defaultMakeRepo = (env: Bindings): Repository | null =>
   env.DB ? createRepository(createDb(env.DB)) : null;
 
+/** 默认 Db 工厂:从本请求 env.DB 建 Db(供 admin backfill 游标读)。无 DB 绑定→null。 */
+export const defaultMakeDb = (env: Bindings): Db | null =>
+  env.DB ? createDb(env.DB) : null;
+
 /**
  * Build the production app with the real AI-SDK port, the REAL governance
  * implementation, and the real D1-backed repository factory. The production
@@ -127,6 +131,8 @@ export function buildApp() {
     makeLlm: defaultMakeLlm,
     governance: createRealGovernance(),
     makeRepo: defaultMakeRepo,
+    makeDb: defaultMakeDb,
+    adminGovernance: createRealGovernance({ allowlistVar: 'ADMIN_API_KEYS' }),
     // Production background-execution port: schedule /ingest's post-response work
     // (orchestrate + saveParsed) on the Workers ExecutionContext so it continues
     // after the 202 is sent within the same invocation. The closure captures the

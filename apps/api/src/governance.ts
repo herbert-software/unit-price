@@ -95,9 +95,9 @@ function extractKey(
   return { kind: 'missing' };
 }
 
-/** Parse the comma-separated `API_KEYS` secret into an allowlist set. */
-function parseAllowlist(env: Bindings): Set<string> {
-  const raw = env.API_KEYS ?? '';
+/** Parse a comma-separated allowlist secret (selected by name) into a set. */
+function parseAllowlist(env: Bindings, varName: 'API_KEYS' | 'ADMIN_API_KEYS'): Set<string> {
+  const raw = env[varName] ?? '';
   return new Set(
     raw
       .split(',')
@@ -112,20 +112,24 @@ function parseAllowlist(env: Bindings): Set<string> {
  * `API_KEYS`) surfaces as a 500 config-error per request — NOT a silent empty
  * allowlist that would punt every valid key to 403.
  */
-export function createRealGovernance(): Governance {
+export function createRealGovernance(opts: { allowlistVar?: 'API_KEYS' | 'ADMIN_API_KEYS' } = {}): Governance {
+  const allowlistVar = opts.allowlistVar ?? 'API_KEYS';
   return {
     authenticate(env, headers): AuthResult {
       const extracted = extractKey(headers);
 
-      // API_KEYS missing/empty is a CONFIGURATION error, not auth-forbidden.
+      // Allowlist missing/empty is a CONFIGURATION error, not auth-forbidden.
       // Surface it as 500 config-error rather than silently 403-ing valid keys.
-      const allowlist = parseAllowlist(env);
+      const allowlist = parseAllowlist(env, allowlistVar);
       if (allowlist.size === 0) {
+        // Secret-source diagnostics go to server logs ONLY; the client message
+        // is generalized so the response body never names a secret.
+        console.warn('[governance] config-error: allowlist', allowlistVar, 'is missing or empty');
         return {
           ok: false,
           status: 500,
           code: 'config-error',
-          message: 'API_KEYS allowlist is missing or empty (configuration error)',
+          message: 'service configuration error',
         };
       }
 
@@ -265,6 +269,24 @@ export function governanceMiddleware(gov: Governance): MiddlewareHandler<AppEnv>
     await gov.recordUsage(c.env, auth.key);
 
     // ④ Business.
+    await next();
+  };
+}
+
+/**
+ * Admin 端点专用 authenticate-only 中间件。只跑 authenticate → 失败 return /
+ * 成功 next()。**不**跑 checkRateLimit、**不**跑 recordUsage、**不**设 govKey
+ * (admin tier 结构上不抵达公共限频/用量门)。鉴权放行后把原始 key 暂存到
+ * `adminKey`(仅 context、绝不原文落日志),供 handler 出 keyed-哈希审计行。
+ * 每个 /admin/* 路由各自挂(Hono 精确路径,无前缀 catch-all)。
+ */
+export function authOnlyMiddleware(gov: Governance): MiddlewareHandler<AppEnv> {
+  return async (c, next) => {
+    const auth = gov.authenticate(c.env, c.req.raw.headers);
+    if (!auth.ok) {
+      return c.json({ error: auth.code, message: auth.message }, auth.status);
+    }
+    c.set('adminKey', auth.key);
     await next();
   };
 }

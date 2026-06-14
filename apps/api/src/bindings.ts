@@ -13,6 +13,10 @@ export interface Bindings {
   OPENROUTER_API_KEY?: string;
   /** Governance allowlist (secret, comma-separated). Consumed by governance. */
   API_KEYS?: string;
+  /** 独立 admin 白名单(逗号分隔,secret)。仅 /admin/* tier 用,与公共 API_KEYS 分离。 */
+  ADMIN_API_KEYS?: string;
+  /** admin 审计日志 key HMAC 的 keying 输入(secret 或部署 salt)。与 ADMIN_API_KEYS 不同源。 */
+  AUDIT_LOG_HMAC_SECRET?: string;
   /** D1 database binding (production pipeline; not consumed by /parse). */
   DB?: D1Database;
   /** KV namespace for governance (rate-limit + usage counters). */
@@ -27,5 +31,9 @@ export interface Bindings {
  *
  * `govKey` is set by governanceMiddleware after auth so handlers can attribute
  * usage (e.g. batch overflow accounting) to the authenticated key.
+ *
+ * `adminKey` is set by the admin authenticate-only middleware after auth admits
+ * the request (the raw key, request-context only — NEVER logged in cleartext;
+ * audit logs record only its keyed hash).
  */
-export type AppEnv = { Bindings: Bindings; Variables: { govKey: string } };
+export type AppEnv = { Bindings: Bindings; Variables: { govKey: string; adminKey?: string } };
