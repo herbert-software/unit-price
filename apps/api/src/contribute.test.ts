@@ -446,7 +446,7 @@ describe('POST /contribute — non-target boundary (5.9)', () => {
     expect(paths).not.toContain('/compare');
   });
 
-  it('migrated table set is exactly {product_raw, product, unit_price, corrections} — no tag/group tables', () => {
+  it('migrated table set is the 4 core + 4 taxonomy tables — only comparison_group forbidden', () => {
     const { handle } = openRepo();
     const tables = (
       handle
@@ -457,10 +457,26 @@ describe('POST /contribute — non-target boundary (5.9)', () => {
     )
       .map((r) => r.name)
       .sort();
-    expect(tables).toEqual(['corrections', 'product', 'product_raw', 'unit_price']);
-    // No category/tag/comparison structures introduced by this change.
-    expect(tables).not.toContain('tag');
-    expect(tables).not.toContain('product_tag');
+    // add-taxonomy-v1 (persistence MODIFIED) legitimately introduces the four
+    // taxonomy tables alongside the original core four; the migrated set is now
+    // exactly those eight.
+    expect(tables).toEqual([
+      'category_closure',
+      'corrections',
+      'product',
+      'product_raw',
+      'product_tag',
+      'store_category_map',
+      'tag',
+      'unit_price',
+    ]);
+    // The taxonomy tables now exist…
+    expect(tables).toContain('tag');
+    expect(tables).toContain('product_tag');
+    expect(tables).toContain('store_category_map');
+    expect(tables).toContain('category_closure');
+    // …but comparison_group stays forbidden — comparison is a dynamic query
+    // (category closure ∧ attribute), never a materialized table.
     expect(tables).not.toContain('comparison_group');
   });
 });

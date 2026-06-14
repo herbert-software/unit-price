@@ -10,6 +10,7 @@
 // CalcResult); provenance/FK/timestamp columns (store, store_sku, source,
 // source_url, captured_at, raw_id, …) are storage extras, not domain fields.
 import {
+  type AnySQLiteColumn,
   index,
   integer,
   real,
@@ -83,6 +84,30 @@ export const product = sqliteTable(
      * inserted equivalent row win ("keep the oldest"). Portable TEXT type.
      */
     dedupeKey: text('dedupe_key').notNull(),
+    /**
+     * Category-attribution extra (NOT a domain field, NOT in `dedupe_key`):
+     * the "粗分类/待细化" non-leaf terminal pointer. Non-null IFF the product is
+     * in the 待细化 (pending) state — a coarse `tag` (non-leaf category node) is
+     * mapped but no leaf `product_tag` is attached yet. The three category-
+     * attribution states are field-discriminable: 已分类叶 = has a kind=category
+     * leaf product_tag ∧ pending NULL; 待细化 = no leaf ∧ pending non-null;
+     * 待人工 = no leaf ∧ pending NULL. Nullable; references `tag`.
+     */
+    pendingCategoryTagId: text('pending_category_tag_id').references(
+      () => tag.id,
+    ),
+    /**
+     * Derived (NOT a domain field, NOT in `dedupe_key`): true IFF the product is
+     * 已分类叶 AND that leaf resolves a non-null `comparable_unit` (v1 = per_100ml
+     * soft drinks). 待细化 / 待人工 / 酒类(comparable_unit=null) are all false.
+     * Recomputed by every category-attribution write path; never read stale.
+     *
+     * Migration safety (B1/D8): added as `INTEGER NOT NULL DEFAULT 0` — the
+     * production `product` table is non-empty and push-to-main auto-migrates;
+     * SQLite refuses a `NOT NULL` column with no DEFAULT on a non-empty table.
+     * Existing rows initialize to 0, then category-tagging backfill recomputes.
+     */
+    rankable: integer('rankable').notNull().default(0),
   },
   (t) => [
     // Dedupe convergence: one product row per `(raw_id + normalized spec)`.
@@ -122,6 +147,126 @@ export const unitPrice = sqliteTable(
     index('unit_price_per100g_idx').on(t.per100g),
     // One unit_price row per product (saveParsed writes them 1:1).
     uniqueIndex('unit_price_product_id_unique').on(t.productId),
+  ],
+);
+
+/**
+ * Tag dictionary (store-agnostic). `kind` partitions the axes:
+ * - `category`: an is-a tree (single-attribution). `parent_id` builds the tree
+ *   (NULL at root); `comparable_unit` is single-point-bound on a node and
+ *   inherited downward (see `resolveComparableUnit`) — NOT repeated per leaf.
+ *   Only `category` participates in `category_closure`.
+ * - `attribute` / `brand` / `product_line`: flat axes; `parent_id` /
+ *   `comparable_unit` stay NULL and they never appear in the closure.
+ *
+ * `comparable_unit` is a nullable TEXT (`per_100ml` is the only value seeded
+ * this period; `per_100g` / `per_100sheet` are v2 placeholders — NOT seeded).
+ * `slug` is unique so seeds are idempotent and lookups are stable.
+ */
+export const tag = sqliteTable(
+  'tag',
+  {
+    id: text('id').primaryKey(),
+    /** Stable store-agnostic identifier (e.g. "carbonated"); unique. */
+    slug: text('slug').notNull(),
+    /** Human-readable display name (e.g. "碳酸饮料"). */
+    name: text('name').notNull(),
+    /** TagKind: category / attribute / brand / product_line. */
+    kind: text('kind').notNull(),
+    /**
+     * is-a parent (category kind only; NULL at root and on flat axes). Drizzle
+     * self-reference uses an inline FK callback (AnySQLiteColumn return type).
+     */
+    parentId: text('parent_id').references((): AnySQLiteColumn => tag.id),
+    /**
+     * Single-point-bound comparable unit (category kind only). Nullable:
+     * resolution inherits the nearest non-null ancestor up the is-a chain; a
+     * node whose chain to root is all-NULL is not rankable.
+     */
+    comparableUnit: text('comparable_unit'),
+  },
+  (t) => [uniqueIndex('tag_slug_unique').on(t.slug)],
+);
+
+/**
+ * Product↔tag edges. Stores ONLY atomic/leaf tags (kind=category leaves +
+ * attribute/brand/product_line). A non-leaf "待细化" attribution is NOT written
+ * here — it lives in `product.pending_category_tag_id`. `(product_id, tag_id)`
+ * is unique, which makes re-attaching the same edge a no-op (idempotent).
+ */
+export const productTag = sqliteTable(
+  'product_tag',
+  {
+    id: text('id').primaryKey(),
+    productId: text('product_id')
+      .notNull()
+      .references(() => product.id),
+    tagId: text('tag_id')
+      .notNull()
+      .references(() => tag.id),
+    /** TagSource: rule / store-map / manual (no `llm` this period). */
+    source: text('source').notNull(),
+    /** Rule/mapping confidence (REAL). */
+    confidence: real('confidence').notNull(),
+  },
+  (t) => [
+    uniqueIndex('product_tag_product_id_tag_id_unique').on(
+      t.productId,
+      t.tagId,
+    ),
+  ],
+);
+
+/**
+ * Per-store native category → our canonical tag, N:1. A coarse native category
+ * may only map to a coarse (non-leaf) node — never down to a leaf; a native
+ * with no v1-tree match is simply not seeded (left to 待人工). `(store,
+ * native_category_id)` is unique. `native_category_id` is stored as portable
+ * TEXT (the store's id, e.g. Sam's `categoryIdList` leaf id as a string).
+ */
+export const storeCategoryMap = sqliteTable(
+  'store_category_map',
+  {
+    id: text('id').primaryKey(),
+    store: text('store').notNull(),
+    nativeCategoryId: text('native_category_id').notNull(),
+    tagId: text('tag_id')
+      .notNull()
+      .references(() => tag.id),
+  },
+  (t) => [
+    uniqueIndex('store_category_map_store_native_category_id_unique').on(
+      t.store,
+      t.nativeCategoryId,
+    ),
+  ],
+);
+
+/**
+ * Category is-a closure, materialized on the tag axis (NOT product×ancestor —
+ * that would grow with the catalog). One row per `(tag_id, ancestor_tag_id)`
+ * where `ancestor_tag_id` is a category ancestor of `tag_id` up to (and
+ * including) the root. Holds ONLY `category` is-a edges; attribute/brand axes
+ * have no closure rows. A product is a member of a node by `product_tag`
+ * (kind=category leaf) JOIN this table. Includes the self row (tag = ancestor)
+ * so a leaf joins itself. `(tag_id, ancestor_tag_id)` is unique.
+ */
+export const categoryClosure = sqliteTable(
+  'category_closure',
+  {
+    id: text('id').primaryKey(),
+    tagId: text('tag_id')
+      .notNull()
+      .references(() => tag.id),
+    ancestorTagId: text('ancestor_tag_id')
+      .notNull()
+      .references(() => tag.id),
+  },
+  (t) => [
+    uniqueIndex('category_closure_tag_id_ancestor_tag_id_unique').on(
+      t.tagId,
+      t.ancestorTagId,
+    ),
   ],
 );
 

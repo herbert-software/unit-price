@@ -7,3 +7,4 @@ export * from './db.js';
 export * from './codec.js';
 export * from './dedupe.js';
 export * from './repository.js';
+export * from './seed.js';

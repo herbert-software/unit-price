@@ -8,15 +8,19 @@
 // verbatim from core's CalcResult (never recomputed from the integer-cents
 // price), and the only transformations are storage codecs (see codec.ts).
 import {
+  ComparableUnitSchema,
   ParsedSpecSchema,
   RawProductSchema,
+  TagSourceSchema,
   UnitPriceSchema,
   WarningsSchema,
   type CalcResult,
+  type ComparableUnit,
   type ParsedSpec,
   type RawProduct,
+  type TagSource,
 } from '@unit-price/core';
-import { asc, eq, isNotNull, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { z } from 'zod';
 import {
@@ -30,7 +34,16 @@ import {
 } from './codec.js';
 import type { Db } from './db.js';
 import { computeDedupeKey } from './dedupe.js';
-import { corrections, product, productRaw, unitPrice } from './schema.js';
+import {
+  categoryClosure,
+  corrections,
+  product,
+  productRaw,
+  productTag,
+  storeCategoryMap,
+  tag,
+  unitPrice,
+} from './schema.js';
 
 /**
  * Dedupe-key columns are provenance extras, not part of RawProductSchema —
@@ -203,6 +216,61 @@ export interface RankingRow {
   sourceUrl: string | null;
 }
 
+/** Input to attach (idempotently) one product↔tag edge by tag slug. */
+export interface AttachTagInput {
+  productId: string;
+  /** Stable tag slug (resolved to tag.id internally). */
+  tagSlug: string;
+  source: TagSource;
+  /** Rule/mapping confidence in [0,1]. */
+  confidence: number;
+}
+
+/** Atomic three-state category reconcile (one tx/batch). */
+export interface ReconcileCategoryInput {
+  productId: string;
+  /** Decided leaf slug to attach (must be a kind=category LEAF), or null. */
+  leafSlug: string | null;
+  /** product_tag.source for the leaf attach (ignored when leafSlug is null). */
+  leafSource: TagSource;
+  /** Coarse non-leaf category node for 待细化 (kind=category NON-leaf), or null. */
+  pendingNodeSlug: string | null;
+  /** Orthogonal attribute slugs to attach idempotently (kind != category). */
+  attributeSlugs: string[];
+  /** Derived rankable flag. */
+  rankable: boolean;
+}
+
+/** One tag attached to a product (debug/read projection). */
+export interface ProductTagRow {
+  tagId: string;
+  slug: string;
+  name: string;
+  kind: string;
+  source: string;
+  confidence: number;
+}
+
+/**
+ * Field-discriminable category-attribution view of a product (debug/verify).
+ * The three states are derived here, not stored: `已分类叶` = has a kind=category
+ * leaf tag ∧ pendingCategoryTagId null; `待细化` = no leaf ∧ pending non-null;
+ * `待人工` = no leaf ∧ pending null.
+ */
+export interface ProductAttribution {
+  productId: string;
+  /** All attached tags (every kind). */
+  tags: ProductTagRow[];
+  /** The single kind=category leaf slug, or null if none attached. */
+  categoryLeafSlug: string | null;
+  /** product.pending_category_tag_id resolved to a slug, or null. */
+  pendingCategorySlug: string | null;
+  /** Derived three-state, mechanically from leaf + pending. */
+  state: 'classified-leaf' | 'pending' | 'manual';
+  /** product.rankable (stored derived flag). */
+  rankable: boolean;
+}
+
 export interface Repository {
   /** Upsert a raw report by `(store, store_sku)`; returns the raw row id. */
   upsertRaw(input: UpsertRawInput): Promise<string>;
@@ -221,6 +289,89 @@ export interface Repository {
    * verbatim; warnings are decoded to string[].
    */
   listRankings(input: ListRankingsInput): Promise<RankingRow[]>;
+
+  // --- category-tagging primitives (atomic writes / closure & inheritance
+  // queries). The three-state reconcile ORCHESTRATION lives in apps/api; these
+  // are the callable atoms it composes. None touches `product.category` (kept
+  // verbatim, always "beverage").
+
+  /**
+   * Attach one product↔tag edge, idempotently. `(product_id, tag_id)` is
+   * unique, so re-attaching the same edge is a no-op (onConflictDoNothing) —
+   * never duplicates, never throws on a repeat. Resolves `tagSlug` → tag.id;
+   * an unknown slug throws (the caller seeded the tree). Does NOT reconcile
+   * the three-state or recompute rankable — that is the caller's job.
+   */
+  attachTag(input: AttachTagInput): Promise<void>;
+
+  /**
+   * Delete every kind=category LEAF `product_tag` of a product (a leaf is a
+   * category tag that is no other category node's parent). Used by the
+   * reconcile to converge single-attribution (drop the old leaf before
+   * inserting the new one) and on the leaf→待人工/待细化 transition. Only touches
+   * kind=category leaves — never attribute/brand/product_line edges. Returns
+   * the count removed. Idempotent (deleting when none present is a no-op).
+   */
+  removeCategoryLeafTags(productId: string): Promise<number>;
+
+  /**
+   * Set `product.pending_category_tag_id` to the tag with `nodeSlug`, or NULL
+   * when `nodeSlug` is null. Used by the reconcile: 待细化 sets a coarse
+   * (non-leaf) node; 已分类叶 / 待人工 clear it to NULL. An unknown slug throws.
+   */
+  setPendingCategory(productId: string, nodeSlug: string | null): Promise<void>;
+
+  /** Write the derived `product.rankable` flag (boolean → 0/1). */
+  setRankable(productId: string, rankable: boolean): Promise<void>;
+
+  /**
+   * Atomically reconcile a product's kind=category three-state + attributes +
+   * rankable in ONE transaction (sqlite) / batch (D1): delete existing category
+   * leaf edges, attach the decided leaf (if any), attach attributes, set pending,
+   * set rankable — the whole group commits or rolls back, so the invariant
+   * "never 有叶 ∧ pending 非空" holds even under partial failure. Validates kinds
+   * BEFORE any write: leafSlug a category LEAF, pendingNodeSlug a category
+   * NON-leaf, attributeSlugs non-category; unknown slug / kind mismatch / both
+   * leaf+pending / missing product → throws before mutating. Idempotent on re-run.
+   */
+  reconcileCategory(input: ReconcileCategoryInput): Promise<void>;
+
+  /**
+   * Resolve a category node's effective `comparable_unit` by is-a inheritance:
+   * take the node's own value, else walk `parent_id` up to the nearest non-null
+   * ancestor; null all the way to root → null (node not rankable). Returns null
+   * for a non-category tag or an unknown slug. Pure read.
+   */
+  resolveComparableUnit(nodeSlug: string): Promise<ComparableUnit | null>;
+
+  /**
+   * Product ids that are members of the category node `nodeSlug`, via
+   * `product_tag` (kind=category leaf) JOIN `category_closure` (the leaf's
+   * ancestor set includes `nodeSlug`). attribute/brand/product_line tags have
+   * no closure rows and never match. Closure includes the self row, so querying
+   * a leaf returns products tagged with that exact leaf too. Unknown/non-
+   * category slug → empty.
+   */
+  listProductIdsInCategoryNode(nodeSlug: string): Promise<string[]>;
+
+  /**
+   * Resolve a store's native category id through `store_category_map` to a tag
+   * slug + kind + leaf flag, or null when unmapped (→ 待人工). `isLeaf` is true
+   * when no tag names this tag as its `parent_id`. Pure read (the arbiter in
+   * apps/api turns this into a `StoreMapResult`: a leaf → leaf verdict, a coarse
+   * node → pending).
+   */
+  lookupStoreCategory(
+    store: string,
+    nativeCategoryId: string,
+  ): Promise<{ slug: string; kind: string; isLeaf: boolean } | null>;
+
+  /**
+   * Debug/verify read: a product's tags, derived category three-state, and
+   * rankable. Not an external contract — for tests/inspection. Null if the
+   * product does not exist.
+   */
+  getProductAttribution(productId: string): Promise<ProductAttribution | null>;
 }
 
 /**
@@ -306,6 +457,55 @@ async function loadExistingPair(
     );
   }
   return { productId: existingProductId, unitPriceId: existingUnitPriceId };
+}
+
+const CategoryTagSlugGate = z.string().min(1);
+
+/** Resolve a tag row (id/kind/parent/comparable_unit) by slug, or null. */
+async function loadTagBySlug(
+  orm: BetterSQLite3Database<Record<string, never>>,
+  slug: string,
+): Promise<{
+  id: string;
+  kind: string;
+  parentId: string | null;
+  comparableUnit: string | null;
+} | null> {
+  const rows = await orm
+    .select({
+      id: tag.id,
+      kind: tag.kind,
+      parentId: tag.parentId,
+      comparableUnit: tag.comparableUnit,
+    })
+    .from(tag)
+    .where(eq(tag.slug, slug))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+/**
+ * Slugs of category tags that are LEAVES (no other category tag names them as
+ * `parent_id`). Used to scope `removeCategoryLeafTags` to leaves only, so a
+ * non-leaf pending pointer is never expressed via product_tag and the
+ * single-attribution reconcile drops only the leaf edge.
+ */
+async function loadCategoryLeafTagIds(
+  orm: BetterSQLite3Database<Record<string, never>>,
+): Promise<Set<string>> {
+  const categories = await orm
+    .select({ id: tag.id, parentId: tag.parentId })
+    .from(tag)
+    .where(eq(tag.kind, 'category'));
+  const hasChild = new Set<string>();
+  for (const c of categories) {
+    if (c.parentId != null) hasChild.add(c.parentId);
+  }
+  const leaves = new Set<string>();
+  for (const c of categories) {
+    if (!hasChild.has(c.id)) leaves.add(c.id);
+  }
+  return leaves;
 }
 
 /** Create the typed repository over an initialized Db (from createDb). */
@@ -598,6 +798,435 @@ export function createRepository(db: Db | null | undefined): Repository {
         storeSku: row.storeSku,
         sourceUrl: row.sourceUrl,
       }));
+    },
+
+    async attachTag(input) {
+      const productId = IdGate.parse(input.productId);
+      const slug = CategoryTagSlugGate.parse(input.tagSlug);
+      const source = TagSourceSchema.parse(input.source);
+      const confidence = z.number().min(0).max(1).parse(input.confidence);
+      const orm = queryOrm(db);
+      const t = await loadTagBySlug(orm, slug);
+      if (t == null) {
+        throw new Error(`attachTag: unknown tag slug "${slug}"`);
+      }
+      if (t.kind === 'category') {
+        const leafIds = await loadCategoryLeafTagIds(orm);
+        if (!leafIds.has(t.id)) {
+          throw new Error(
+            `attachTag: category tag "${slug}" must be attached at leaf granularity`,
+          );
+        }
+        // 落叶要求 pending 为空;否则成「有叶∧pending」越界态。三态转换走
+        // reconcileCategory(原子),不经此原语。
+        const prodRows = await orm
+          .select({ pendingCategoryTagId: product.pendingCategoryTagId })
+          .from(product)
+          .where(eq(product.id, productId))
+          .limit(1);
+        if (prodRows[0]?.pendingCategoryTagId != null) {
+          throw new Error(
+            `attachTag: attaching a category leaf while pending is set creates 有叶∧pending; use reconcileCategory`,
+          );
+        }
+      }
+      // (product_id, tag_id) is unique → re-attaching the same edge is a no-op.
+      await orm
+        .insert(productTag)
+        .values({ id: newId(), productId, tagId: t.id, source, confidence })
+        .onConflictDoNothing({
+          target: [productTag.productId, productTag.tagId],
+        });
+    },
+
+    async removeCategoryLeafTags(productId) {
+      IdGate.parse(productId);
+      const orm = queryOrm(db);
+      const leafIds = await loadCategoryLeafTagIds(orm);
+      if (leafIds.size === 0) return 0;
+      // Delete only this product's edges whose tag is a category LEAF — never
+      // touches attribute/brand/product_line edges.
+      const result = await orm
+        .delete(productTag)
+        .where(
+          and(
+            eq(productTag.productId, productId),
+            inArray(productTag.tagId, [...leafIds]),
+          ),
+        )
+        .returning({ tagId: productTag.tagId });
+      return result.length;
+    },
+
+    async setPendingCategory(productId, nodeSlug) {
+      IdGate.parse(productId);
+      const orm = queryOrm(db);
+      const prodRows = await orm
+        .select({ id: product.id })
+        .from(product)
+        .where(eq(product.id, productId))
+        .limit(1);
+      if (prodRows[0] == null) {
+        throw new Error(`setPendingCategory: unknown product "${productId}"`);
+      }
+      let pendingId: string | null = null;
+      if (nodeSlug != null) {
+        const slug = CategoryTagSlugGate.parse(nodeSlug);
+        const t = await loadTagBySlug(orm, slug);
+        if (t == null) {
+          throw new Error(`setPendingCategory: unknown tag slug "${slug}"`);
+        }
+        const leafIds = await loadCategoryLeafTagIds(orm);
+        if (t.kind !== 'category' || leafIds.has(t.id)) {
+          throw new Error(
+            `setPendingCategory: "${slug}" must be a non-leaf category node`,
+          );
+        }
+        // 待细化要求无叶;若已有 category 叶,设 pending 会造「有叶∧pending」
+        // 越界态。三态转换必须走 reconcileCategory(原子)。
+        const existingLeaf = await orm
+          .select({ id: productTag.id })
+          .from(productTag)
+          .where(
+            and(
+              eq(productTag.productId, productId),
+              inArray(productTag.tagId, [...leafIds]),
+            ),
+          )
+          .limit(1);
+        if (existingLeaf[0] != null) {
+          throw new Error(
+            `setPendingCategory: product has a category leaf — setting pending would create 有叶∧pending; use reconcileCategory`,
+          );
+        }
+        pendingId = t.id;
+      }
+      await orm
+        .update(product)
+        .set({ pendingCategoryTagId: pendingId })
+        .where(eq(product.id, productId));
+    },
+
+    async setRankable(productId, rankable) {
+      IdGate.parse(productId);
+      const orm = queryOrm(db);
+      const rows = await orm
+        .select({ id: product.id })
+        .from(product)
+        .where(eq(product.id, productId))
+        .limit(1);
+      if (rows[0] == null) {
+        throw new Error(`setRankable: unknown product "${productId}"`);
+      }
+      await orm
+        .update(product)
+        .set({ rankable: rankable ? 1 : 0 })
+        .where(eq(product.id, productId));
+    },
+
+    async reconcileCategory(input) {
+      const productId = IdGate.parse(input.productId);
+      const leafSrc = TagSourceSchema.parse(input.leafSource);
+      const orm = queryOrm(db);
+      // Product must exist (no silent no-op on a typo'd/missing id).
+      const prodRows = await orm
+        .select({ id: product.id })
+        .from(product)
+        .where(eq(product.id, productId))
+        .limit(1);
+      if (prodRows[0] == null) {
+        throw new Error(`reconcileCategory: unknown product "${productId}"`);
+      }
+      const leafIds = await loadCategoryLeafTagIds(orm);
+      let leafTagId: string | null = null;
+      if (input.leafSlug != null) {
+        const slug = CategoryTagSlugGate.parse(input.leafSlug);
+        const t = await loadTagBySlug(orm, slug);
+        if (t == null)
+          throw new Error(`reconcileCategory: unknown leaf slug "${slug}"`);
+        if (t.kind !== 'category' || !leafIds.has(t.id)) {
+          throw new Error(
+            `reconcileCategory: leaf slug "${slug}" is not a category leaf`,
+          );
+        }
+        leafTagId = t.id;
+      }
+      let pendingId: string | null = null;
+      if (input.pendingNodeSlug != null) {
+        const slug = CategoryTagSlugGate.parse(input.pendingNodeSlug);
+        const t = await loadTagBySlug(orm, slug);
+        if (t == null)
+          throw new Error(`reconcileCategory: unknown pending slug "${slug}"`);
+        if (t.kind !== 'category' || leafIds.has(t.id)) {
+          throw new Error(
+            `reconcileCategory: pending slug "${slug}" must be a non-leaf category node`,
+          );
+        }
+        pendingId = t.id;
+      }
+      if (leafTagId != null && pendingId != null) {
+        throw new Error(
+          'reconcileCategory: cannot set both a leaf and a pending node',
+        );
+      }
+      const attrTagIds: string[] = [];
+      for (const s of input.attributeSlugs) {
+        const slug = CategoryTagSlugGate.parse(s);
+        const t = await loadTagBySlug(orm, slug);
+        if (t == null)
+          throw new Error(`reconcileCategory: unknown attribute slug "${slug}"`);
+        if (t.kind === 'category') {
+          throw new Error(
+            `reconcileCategory: attribute slug "${slug}" must not be a category tag`,
+          );
+        }
+        attrTagIds.push(t.id);
+      }
+      const rankableInt = input.rankable ? 1 : 0;
+      const leafIdsArr = [...leafIds];
+
+      if (db.kind === 'sqlite') {
+        return db.orm.transaction((tx) => {
+          if (leafIdsArr.length > 0) {
+            tx.delete(productTag)
+              .where(
+                and(
+                  eq(productTag.productId, productId),
+                  inArray(productTag.tagId, leafIdsArr),
+                ),
+              )
+              .run();
+          }
+          if (leafTagId != null) {
+            tx.insert(productTag)
+              .values({
+                id: newId(),
+                productId,
+                tagId: leafTagId,
+                source: leafSrc,
+                confidence: 1,
+              })
+              .onConflictDoNothing({
+                target: [productTag.productId, productTag.tagId],
+              })
+              .run();
+          }
+          for (const aid of attrTagIds) {
+            tx.insert(productTag)
+              .values({
+                id: newId(),
+                productId,
+                tagId: aid,
+                source: 'rule',
+                confidence: 1,
+              })
+              .onConflictDoNothing({
+                target: [productTag.productId, productTag.tagId],
+              })
+              .run();
+          }
+          tx.update(product)
+            .set({ pendingCategoryTagId: pendingId, rankable: rankableInt })
+            .where(eq(product.id, productId))
+            .run();
+        });
+      }
+      // D1: batch() commits/rolls back the whole group atomically.
+      const stmts = [];
+      if (leafIdsArr.length > 0) {
+        stmts.push(
+          db.orm.delete(productTag).where(
+            and(
+              eq(productTag.productId, productId),
+              inArray(productTag.tagId, leafIdsArr),
+            ),
+          ),
+        );
+      }
+      if (leafTagId != null) {
+        stmts.push(
+          db.orm
+            .insert(productTag)
+            .values({
+              id: newId(),
+              productId,
+              tagId: leafTagId,
+              source: leafSrc,
+              confidence: 1,
+            })
+            .onConflictDoNothing({
+              target: [productTag.productId, productTag.tagId],
+            }),
+        );
+      }
+      for (const aid of attrTagIds) {
+        stmts.push(
+          db.orm
+            .insert(productTag)
+            .values({
+              id: newId(),
+              productId,
+              tagId: aid,
+              source: 'rule',
+              confidence: 1,
+            })
+            .onConflictDoNothing({
+              target: [productTag.productId, productTag.tagId],
+            }),
+        );
+      }
+      stmts.push(
+        db.orm
+          .update(product)
+          .set({ pendingCategoryTagId: pendingId, rankable: rankableInt })
+          .where(eq(product.id, productId)),
+      );
+      await db.orm.batch(
+        stmts as unknown as Parameters<typeof db.orm.batch>[0],
+      );
+    },
+
+    async resolveComparableUnit(nodeSlug) {
+      const slug = CategoryTagSlugGate.parse(nodeSlug);
+      const orm = queryOrm(db);
+      let cursor = await loadTagBySlug(orm, slug);
+      if (cursor == null || cursor.kind !== 'category') return null;
+      // Walk parent_id up the is-a chain to the nearest non-null comparable_unit.
+      // A bounded guard (tree depth is tiny) defends against a malformed cycle.
+      let guard = 0;
+      while (cursor != null && guard < 64) {
+        if (cursor.comparableUnit != null) {
+          return ComparableUnitSchema.parse(cursor.comparableUnit);
+        }
+        if (cursor.parentId == null) return null;
+        const parentRows = await orm
+          .select({
+            id: tag.id,
+            kind: tag.kind,
+            parentId: tag.parentId,
+            comparableUnit: tag.comparableUnit,
+          })
+          .from(tag)
+          .where(eq(tag.id, cursor.parentId))
+          .limit(1);
+        cursor = parentRows[0] ?? null;
+        guard += 1;
+      }
+      return null;
+    },
+
+    async listProductIdsInCategoryNode(nodeSlug) {
+      const slug = CategoryTagSlugGate.parse(nodeSlug);
+      const orm = queryOrm(db);
+      const node = await loadTagBySlug(orm, slug);
+      if (node == null || node.kind !== 'category') return [];
+      // product_tag (leaf) → category_closure (leaf has node as an ancestor).
+      // Closure rows exist only for category edges, so attribute/brand tags
+      // never match here even though they live in the same product_tag table.
+      const rows = await orm
+        .selectDistinct({ productId: productTag.productId })
+        .from(productTag)
+        .innerJoin(categoryClosure, eq(categoryClosure.tagId, productTag.tagId))
+        .where(eq(categoryClosure.ancestorTagId, node.id));
+      return rows.map((r) => r.productId);
+    },
+
+    async lookupStoreCategory(store, nativeCategoryId) {
+      const orm = queryOrm(db);
+      const rows = await orm
+        .select({ id: tag.id, slug: tag.slug, kind: tag.kind })
+        .from(storeCategoryMap)
+        .innerJoin(tag, eq(tag.id, storeCategoryMap.tagId))
+        .where(
+          and(
+            eq(storeCategoryMap.store, store),
+            eq(storeCategoryMap.nativeCategoryId, nativeCategoryId),
+          ),
+        )
+        .limit(1);
+      const hit = rows[0];
+      if (hit == null) return null;
+      // Leaf = no tag names this tag as its parent_id.
+      const children = await orm
+        .select({ id: tag.id })
+        .from(tag)
+        .where(eq(tag.parentId, hit.id))
+        .limit(1);
+      return { slug: hit.slug, kind: hit.kind, isLeaf: children.length === 0 };
+    },
+
+    async getProductAttribution(productId) {
+      IdGate.parse(productId);
+      const orm = queryOrm(db);
+      const productRows = await orm
+        .select({
+          id: product.id,
+          pendingCategoryTagId: product.pendingCategoryTagId,
+          rankable: product.rankable,
+        })
+        .from(product)
+        .where(eq(product.id, productId))
+        .limit(1);
+      const p = productRows[0];
+      if (p == null) return null;
+
+      const tagRows = await orm
+        .select({
+          tagId: tag.id,
+          slug: tag.slug,
+          name: tag.name,
+          kind: tag.kind,
+          parentId: tag.parentId,
+          source: productTag.source,
+          confidence: productTag.confidence,
+        })
+        .from(productTag)
+        .innerJoin(tag, eq(tag.id, productTag.tagId))
+        .where(eq(productTag.productId, productId));
+
+      const leafIds = await loadCategoryLeafTagIds(orm);
+      let categoryLeafSlug: string | null = null;
+      const tags: ProductTagRow[] = tagRows.map((r) => {
+        if (r.kind === 'category' && leafIds.has(r.tagId)) {
+          categoryLeafSlug = r.slug;
+        }
+        return {
+          tagId: r.tagId,
+          slug: r.slug,
+          name: r.name,
+          kind: r.kind,
+          source: r.source,
+          confidence: r.confidence,
+        };
+      });
+
+      let pendingCategorySlug: string | null = null;
+      if (p.pendingCategoryTagId != null) {
+        const pendingRows = await orm
+          .select({ slug: tag.slug })
+          .from(tag)
+          .where(eq(tag.id, p.pendingCategoryTagId))
+          .limit(1);
+        pendingCategorySlug = pendingRows[0]?.slug ?? null;
+      }
+
+      // Three-state: classified-leaf = has leaf ∧ pending null; pending = no
+      // leaf ∧ pending non-null; manual = no leaf ∧ pending null. (Mechanical.)
+      const state: ProductAttribution['state'] =
+        categoryLeafSlug != null
+          ? 'classified-leaf'
+          : p.pendingCategoryTagId != null
+            ? 'pending'
+            : 'manual';
+
+      return {
+        productId: p.id,
+        tags,
+        categoryLeafSlug,
+        pendingCategorySlug,
+        state,
+        rankable: p.rankable === 1,
+      };
     },
   };
 }

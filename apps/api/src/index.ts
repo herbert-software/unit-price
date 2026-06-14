@@ -47,6 +47,14 @@ export {
   type OrchestrationOutcome,
 } from './orchestrate.js';
 export {
+  tagProduct,
+  runBackfill,
+  listProductsForBackfill,
+  type TagProductInput,
+  type TagProductResult,
+  type BackfillResult,
+} from './tagging.js';
+export {
   AiSdkSpecParser,
   type SpecParserLLM,
   type ParseResult,
