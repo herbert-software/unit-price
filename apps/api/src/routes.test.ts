@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { RawProduct } from '@unit-price/core';
-import type { ListRankingsInput, RankingRow, Repository } from '@unit-price/db';
+import type { CategoryTreeNode, ListRankingsInput, RankingRow, Repository } from '@unit-price/db';
 import { createApp } from './routes.js';
 import { buildApp } from './index.js';
 import { createNoopGovernance, createRealGovernance } from './governance.js';
@@ -596,23 +596,153 @@ describe('GET /rankings — out-of-range offset -> 200 + []', () => {
   });
 });
 
-describe('GET /rankings — unknown/non-exact category -> 400', () => {
+describe('GET /rankings — unknown/non-category/wrong-case/empty category -> 400', () => {
   it.each([
-    ['unsupported category', '?category=alcohol'],
+    ['unknown slug', '?category=nope'],
+    ['attribute (non-category) slug', '?category=sugar-free'],
     ['wrong case', '?category=Beverage'],
     ['empty string', '?category='],
-  ])('%s -> 400 invalid-request (only exact lowercase beverage admitted)', async (_name, query) => {
+  ])('%s -> 400 invalid-request (only an exact seed kind=category slug admitted)', async (_name, query) => {
     const { app, listRankings } = rankingsApp(SNAPSHOT);
     const { res, json } = await getRankings(app, query);
     expect(res.status).toBe(400);
     expect(json.error).toBe('invalid-request');
+    // 400 fires before the repo is queried.
     expect(listRankings).not.toHaveBeenCalled();
   });
 
-  it('?category=beverage (exact) is admitted -> 200', async () => {
-    const { app } = rankingsApp(SNAPSHOT);
-    const { res } = await getRankings(app, '?category=beverage');
+  it.each([
+    ['root', 'beverage'],
+    ['soft-drink parent', 'soft-drink'],
+    ['carbonated leaf', 'carbonated'],
+    ['alcohol (legal but rankable=false subtree)', 'alcohol'],
+  ])('?category=%s (exact seed slug) is admitted -> 200', async (_name, slug) => {
+    let seen: ListRankingsInput | null = null;
+    const { app } = rankingsApp(SNAPSHOT, { onCall: (i) => (seen = i) });
+    const { res } = await getRankings(app, `?category=${slug}`);
     expect(res.status).toBe(200);
+    // The validated slug is forwarded to listRankings verbatim.
+    expect(seen!.category).toBe(slug);
+  });
+});
+
+describe('GET /rankings — node scope: default = beverage = root closure', () => {
+  it('no params ≡ ?category=beverage: same forwarded ListRankingsInput', async () => {
+    let noParam: ListRankingsInput | null = null;
+    const a = rankingsApp(SNAPSHOT, { onCall: (i) => (noParam = i) });
+    await getRankings(a.app);
+    let explicit: ListRankingsInput | null = null;
+    const b = rankingsApp(SNAPSHOT, { onCall: (i) => (explicit = i) });
+    await getRankings(b.app, '?category=beverage');
+    expect(noParam!).toEqual(explicit!);
+    expect(noParam!.category).toBe('beverage');
+  });
+});
+
+// The repo owns the closure + rankable=1 + per100ml gate (covered in @unit-price/
+// db's own tests). Here we assert the ROUTE forwards the validated node slug and
+// faithfully projects whatever the repo returns. A "node-aware" fake keys its
+// snapshot by slug so we can exercise route-level closure semantics: a leaf
+// returns only its members, a parent returns the union of its leaves, an
+// alcohol/empty node returns []. rankable=false rows simply never appear in any
+// snapshot (the repo's gate excludes them before the route ever sees a row).
+function nodeRankingsApp(byNode: Record<string, RankingRow[]>) {
+  const listRankings = vi.fn(async (input: ListRankingsInput): Promise<RankingRow[]> => {
+    const data = byNode[input.category] ?? [];
+    return data.slice(input.offset, input.offset + input.limit);
+  });
+  const repo = {
+    async upsertRaw() {
+      throw new Error('rankings is read-only: upsertRaw must not be called');
+    },
+    async saveParsed() {
+      throw new Error('rankings is read-only: saveParsed must not be called');
+    },
+    async getProduct() {
+      return null;
+    },
+    async saveCorrection() {
+      throw new Error('rankings is read-only: saveCorrection must not be called');
+    },
+    listRankings,
+  } as unknown as Repository;
+  const app = createApp({
+    makeLlm: () => throwingPort,
+    governance: createNoopGovernance(),
+    makeRepo: () => repo,
+  });
+  return { app, listRankings };
+}
+
+describe('GET /rankings — closure node scoping (route forwards slug, projects rows)', () => {
+  // A small dirty-ish snapshot keyed by node. The root snapshot is the union of
+  // the two soft-drink leaves (carbonated + drinking-water) — i.e. the parent
+  // closure includes the child leaves. alcohol returns [] (rankable=false subtree).
+  const carbonated = [
+    row({ id: 'c-1', per100ml: 0.5, storeSku: 'sku-carb-1' }),
+    row({ id: 'c-2', per100ml: 3.2, storeSku: 'sku-carb-2' }),
+  ];
+  const water = [row({ id: 'w-1', per100ml: 1.1, storeSku: 'sku-water-1' })];
+  // soft-drink parent / root closure = both leaves, merged ascending by per100ml.
+  const softDrink = [carbonated[0]!, water[0]!, carbonated[1]!];
+  const byNode: Record<string, RankingRow[]> = {
+    beverage: softDrink,
+    'soft-drink': softDrink,
+    carbonated,
+    'drinking-water': water,
+    alcohol: [],
+  };
+
+  it('leaf ?category=carbonated returns only the carbonated members', async () => {
+    const { app } = nodeRankingsApp(byNode);
+    const { res, json } = await getRankings(app, '?category=carbonated');
+    expect(res.status).toBe(200);
+    expect(json.map((r: any) => r.storeSku)).toEqual(['sku-carb-1', 'sku-carb-2']);
+    // A sibling leaf's member (drinking-water) does NOT appear.
+    expect(json.find((r: any) => r.storeSku === 'sku-water-1')).toBeUndefined();
+  });
+
+  it('parent ?category=soft-drink includes the child-leaf members (closure)', async () => {
+    const { app } = nodeRankingsApp(byNode);
+    const { res, json } = await getRankings(app, '?category=soft-drink');
+    expect(res.status).toBe(200);
+    // Union of carbonated + drinking-water leaves, ascending, ranks contiguous.
+    expect(json.map((r: any) => r.storeSku)).toEqual([
+      'sku-carb-1',
+      'sku-water-1',
+      'sku-carb-2',
+    ]);
+    expect(json.map((r: any) => r.rank)).toEqual([1, 2, 3]);
+  });
+
+  it('default (no params) = root beverage closure = soft-drink union', async () => {
+    const { app } = nodeRankingsApp(byNode);
+    const { res, json } = await getRankings(app);
+    expect(res.status).toBe(200);
+    expect(json.map((r: any) => r.storeSku)).toEqual([
+      'sku-carb-1',
+      'sku-water-1',
+      'sku-carb-2',
+    ]);
+  });
+
+  it('alcohol node (rankable=false subtree) -> 200 + [] (not 400/404)', async () => {
+    const { app } = nodeRankingsApp(byNode);
+    const { res, json } = await getRankings(app, '?category=alcohol');
+    expect(res.status).toBe(200);
+    expect(json).toEqual([]);
+  });
+
+  it('legal-but-unseeded slug (no tag row) -> 200 + [] (not 400)', async () => {
+    // `juice-plant` is a seed slug but absent from byNode → repo returns []
+    // (the migrate-before-seed window), mirroring a real repo's behavior.
+    const { app, listRankings } = nodeRankingsApp(byNode);
+    const { res, json } = await getRankings(app, '?category=juice-plant');
+    expect(res.status).toBe(200);
+    expect(json).toEqual([]);
+    // It passed the 400 gate (a legal slug) and reached the repo — NOT a typo 400.
+    expect(listRankings).toHaveBeenCalled();
+    expect(listRankings.mock.calls[0]![0].category).toBe('juice-plant');
   });
 });
 
@@ -714,5 +844,291 @@ describe('GET /rankings — governance-exempt public endpoint (4.2)', () => {
     const res = await request('/parse'); // GET (no key) — auth fires first
     expect(res.status).toBe(401);
     expect((await res.json()).error).toBe('auth-missing');
+  });
+});
+
+// ── GET /categories — read-only category-tree browse (category-tree-api spec) ──
+//
+// The route is a thin read-only pass-through: it calls repo.listCategoryTree,
+// wraps the nodes in `{ nodes }`, validates CategoryTreeResponseSchema, and
+// returns. The inheritance resolution, the `rankable` axis flag, the closure
+// `rankableCount`, and the "only kind=category" filter are repo-owned (covered in
+// @unit-price/db's own tests). Here we assert the HTTP contract against a fixture
+// that MIRRORS the seed tree so the route-level shape/value passthrough and the
+// `rankableCount`↔node-board consistency are exercised end to end.
+
+/** A CategoryTreeNode fixture. */
+function node(over: Partial<CategoryTreeNode> & Pick<CategoryTreeNode, 'slug' | 'name'>): CategoryTreeNode {
+  return {
+    parentSlug: null,
+    comparableUnit: null,
+    rankable: false,
+    rankableCount: 0,
+    ...over,
+  };
+}
+
+/**
+ * A tree fixture mirroring the seed: root `beverage` (rankable=false but
+ * rankableCount>0 = default board basis), the `soft-drink` parent and its leaves
+ * (all per_100ml / rankable=true), and the alcohol subtree (comparableUnit=null /
+ * rankable=false / rankableCount=0). Counts are chosen so the parent equals the
+ * union of its leaves and root equals the soft-drink total.
+ */
+const TREE: CategoryTreeNode[] = [
+  node({ slug: 'beverage', name: '饮料', parentSlug: null, comparableUnit: null, rankable: false, rankableCount: 7 }),
+  node({ slug: 'soft-drink', name: '软饮', parentSlug: 'beverage', comparableUnit: 'per_100ml', rankable: true, rankableCount: 7 }),
+  node({ slug: 'carbonated', name: '碳酸饮料', parentSlug: 'soft-drink', comparableUnit: 'per_100ml', rankable: true, rankableCount: 4 }),
+  node({ slug: 'drinking-water', name: '饮用水', parentSlug: 'soft-drink', comparableUnit: 'per_100ml', rankable: true, rankableCount: 3 }),
+  node({ slug: 'juice-plant', name: '果汁·植物饮', parentSlug: 'soft-drink', comparableUnit: 'per_100ml', rankable: true, rankableCount: 0 }),
+  node({ slug: 'alcohol', name: '酒类', parentSlug: 'beverage', comparableUnit: null, rankable: false, rankableCount: 0 }),
+  node({ slug: 'wine', name: '葡萄酒', parentSlug: 'alcohol', comparableUnit: null, rankable: false, rankableCount: 0 }),
+  node({ slug: 'baijiu', name: '白酒', parentSlug: 'alcohol', comparableUnit: null, rankable: false, rankableCount: 0 }),
+];
+
+/** App whose Repository serves `tree` from listCategoryTree (read-only). */
+function categoriesApp(tree: CategoryTreeNode[], opts: { throws?: boolean } = {}) {
+  const listCategoryTree = vi.fn(async (): Promise<CategoryTreeNode[]> => {
+    if (opts.throws) throw new Error('simulated read failure');
+    return tree;
+  });
+  const repo = {
+    async upsertRaw() {
+      throw new Error('categories is read-only: upsertRaw must not be called');
+    },
+    async saveParsed() {
+      throw new Error('categories is read-only: saveParsed must not be called');
+    },
+    async getProduct() {
+      return null;
+    },
+    async saveCorrection() {
+      throw new Error('categories is read-only: saveCorrection must not be called');
+    },
+    listCategoryTree,
+  } as unknown as Repository;
+  const app = createApp({
+    makeLlm: () => throwingPort,
+    governance: createNoopGovernance(),
+    makeRepo: () => repo,
+  });
+  return { app, listCategoryTree };
+}
+
+/** GET /categories on an app, returning {res, json}. */
+async function getCategories(app: ReturnType<typeof createApp>) {
+  const res = await app.request('/categories', { method: 'GET' });
+  let json: any = null;
+  try {
+    json = await res.json();
+  } catch {
+    json = null;
+  }
+  return { res, json };
+}
+
+describe('GET /categories — full category is-a tree, only the category axis', () => {
+  it('returns 200 { nodes } with every category node, no attribute/brand/product_line axis', async () => {
+    const { app } = categoriesApp(TREE);
+    const { res, json } = await getCategories(app);
+    expect(res.status).toBe(200);
+    expect(Array.isArray(json.nodes)).toBe(true);
+    const slugs = json.nodes.map((n: any) => n.slug);
+    // Every category node is present.
+    expect(slugs).toEqual(TREE.map((n) => n.slug));
+    // No attribute axis slug (e.g. sugar-free) leaks in — the repo only emits
+    // kind=category nodes, so the response carries none.
+    expect(slugs).not.toContain('sugar-free');
+    expect(slugs).not.toContain('sparkling');
+    // Each node carries exactly the contract fields.
+    for (const n of json.nodes) {
+      expect(n).toHaveProperty('slug');
+      expect(n).toHaveProperty('name');
+      expect(n).toHaveProperty('parentSlug');
+      expect(n).toHaveProperty('comparableUnit');
+      expect(n).toHaveProperty('rankable');
+      expect(n).toHaveProperty('rankableCount');
+    }
+  });
+});
+
+describe('GET /categories — comparableUnit / rankable per node', () => {
+  it('soft-drink parent + leaves: per_100ml + rankable=true; alcohol+root: null + rankable=false', async () => {
+    const { app } = categoriesApp(TREE);
+    const { json } = await getCategories(app);
+    const bySlug: Record<string, any> = Object.fromEntries(json.nodes.map((n: any) => [n.slug, n]));
+    // soft-drink parent (directly bound) and soft-drink leaves (inherited).
+    for (const slug of ['soft-drink', 'carbonated', 'drinking-water', 'juice-plant']) {
+      expect(bySlug[slug].comparableUnit).toBe('per_100ml');
+      expect(bySlug[slug].rankable).toBe(true);
+    }
+    // alcohol parent + alcohol leaves + root: comparableUnit null, rankable false.
+    for (const slug of ['alcohol', 'wine', 'baijiu', 'beverage']) {
+      expect(bySlug[slug].comparableUnit).toBeNull();
+      expect(bySlug[slug].rankable).toBe(false);
+    }
+  });
+});
+
+describe('GET /categories — rankableCount orthogonal to rankable', () => {
+  it('root beverage rankableCount > 0 and equals default /rankings basis; alcohol = 0', async () => {
+    const { app } = categoriesApp(TREE);
+    const { json } = await getCategories(app);
+    const bySlug: Record<string, any> = Object.fromEntries(json.nodes.map((n: any) => [n.slug, n]));
+    // Root is rankable=false yet its closure has rankable members → count > 0.
+    expect(bySlug.beverage.rankable).toBe(false);
+    expect(bySlug.beverage.rankableCount).toBeGreaterThan(0);
+    // soft-drink parent count = union of its leaves (4 + 3 + 0).
+    expect(bySlug['soft-drink'].rankableCount).toBe(7);
+    // alcohol subtree has no rankable members → count 0 (despite being a node).
+    expect(bySlug.alcohol.rankableCount).toBe(0);
+    expect(bySlug.wine.rankableCount).toBe(0);
+  });
+
+  it('an empty leaf (juice-plant) stays in the tree with rankableCount=0', async () => {
+    const { app } = categoriesApp(TREE);
+    const { json } = await getCategories(app);
+    const jp = json.nodes.find((n: any) => n.slug === 'juice-plant');
+    expect(jp).toBeDefined();
+    expect(jp.rankableCount).toBe(0);
+  });
+});
+
+describe('GET /categories — rankableCount matches the node board basis', () => {
+  it('root rankableCount equals the default /rankings (no params) basis (same snapshot)', async () => {
+    // One repo serves BOTH endpoints off a shared snapshot: a 7-row root board
+    // and a tree whose root rankableCount=7. The route must report the same N on
+    // both surfaces.
+    const rootBoard: RankingRow[] = Array.from({ length: 7 }, (_, i) =>
+      row({ id: `r-${i}`, per100ml: i + 1, storeSku: `sku-r-${i}` }),
+    );
+    const listRankings = vi.fn(async (input: ListRankingsInput) =>
+      rootBoard.slice(input.offset, input.offset + input.limit),
+    );
+    const listCategoryTree = vi.fn(async () => TREE);
+    const repo = {
+      async upsertRaw() {
+        throw new Error('read-only');
+      },
+      async saveParsed() {
+        throw new Error('read-only');
+      },
+      async getProduct() {
+        return null;
+      },
+      async saveCorrection() {
+        throw new Error('read-only');
+      },
+      listRankings,
+      listCategoryTree,
+    } as unknown as Repository;
+    const app = createApp({
+      makeLlm: () => throwingPort,
+      governance: createNoopGovernance(),
+      makeRepo: () => repo,
+    });
+
+    const cats = await getCategories(app);
+    const rootCount = cats.json.nodes.find((n: any) => n.slug === 'beverage').rankableCount;
+    const board = await getRankings(app, '?limit=200');
+    expect(board.json).toHaveLength(rootCount);
+  });
+
+  it('alcohol rankableCount=0 and its node board is empty (same data)', async () => {
+    const byNode: Record<string, RankingRow[]> = { alcohol: [] };
+    const listRankings = vi.fn(async (input: ListRankingsInput) =>
+      (byNode[input.category] ?? []).slice(input.offset, input.offset + input.limit),
+    );
+    const listCategoryTree = vi.fn(async () => TREE);
+    const repo = {
+      async upsertRaw() {
+        throw new Error('read-only');
+      },
+      async saveParsed() {
+        throw new Error('read-only');
+      },
+      async getProduct() {
+        return null;
+      },
+      async saveCorrection() {
+        throw new Error('read-only');
+      },
+      listRankings,
+      listCategoryTree,
+    } as unknown as Repository;
+    const app = createApp({
+      makeLlm: () => throwingPort,
+      governance: createNoopGovernance(),
+      makeRepo: () => repo,
+    });
+    const cats = await getCategories(app);
+    const alcoholCount = cats.json.nodes.find((n: any) => n.slug === 'alcohol').rankableCount;
+    expect(alcoholCount).toBe(0);
+    const board = await getRankings(app, '?category=alcohol');
+    expect(board.json).toEqual([]);
+  });
+});
+
+describe('GET /categories — unseeded taxonomy -> 200 { nodes: [] }', () => {
+  it('no kind=category rows returns 200 and an empty tree (not an error)', async () => {
+    const { app } = categoriesApp([]);
+    const { res, json } = await getCategories(app);
+    expect(res.status).toBe(200);
+    expect(json).toEqual({ nodes: [] });
+  });
+});
+
+describe('GET /categories — read failure -> 500 persistence-error', () => {
+  it('listCategoryTree throwing maps to 500 persistence-error', async () => {
+    const { app } = categoriesApp(TREE, { throws: true });
+    const { res, json } = await getCategories(app);
+    expect(res.status).toBe(500);
+    expect(json.error).toBe('persistence-error');
+  });
+});
+
+describe('GET /categories — response validation failure -> 500 internal', () => {
+  it('a node violating CategoryTreeResponseSchema (rankableCount<0) maps to 500 internal', async () => {
+    const { app } = categoriesApp([node({ slug: 'beverage', name: '饮料', rankableCount: -1 })]);
+    const { res, json } = await getCategories(app);
+    expect(res.status).toBe(500);
+    expect(json.error).toBe('internal');
+  });
+});
+
+describe('GET /categories — governance-exempt public endpoint', () => {
+  it('GET /categories without a key -> 200, and NO rate-limit/usage write to GOVERNANCE_KV', async () => {
+    const get = vi.fn(async () => null);
+    const put = vi.fn(async () => undefined);
+    const kv = { get, put } as unknown as Bindings['GOVERNANCE_KV'];
+    const listCategoryTree = vi.fn(async () => TREE);
+    const repo = {
+      async upsertRaw() {
+        throw new Error('read-only');
+      },
+      async saveParsed() {
+        throw new Error('read-only');
+      },
+      async getProduct() {
+        return null;
+      },
+      async saveCorrection() {
+        throw new Error('read-only');
+      },
+      listCategoryTree,
+    } as unknown as Repository;
+    // REAL governance configured (API_KEYS present) — yet /categories must NOT
+    // engage auth/rate/usage at all (governance-exempt, like /rankings).
+    const app = createApp({
+      makeLlm: () => throwingPort,
+      governance: createRealGovernance(),
+      makeRepo: () => repo,
+    });
+    const res = await app.request('/categories', { method: 'GET' }, { API_KEYS: 'key-alpha', GOVERNANCE_KV: kv });
+    expect(res.status).toBe(200);
+    expect(res.status).not.toBe(401);
+    expect(res.status).not.toBe(403);
+    expect(get).not.toHaveBeenCalled();
+    expect(put).not.toHaveBeenCalled();
   });
 });

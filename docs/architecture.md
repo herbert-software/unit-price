@@ -90,7 +90,8 @@ unit-price/
   - `POST /parse` — RawProduct → ParsedSpec + UnitPrice + confidence + comparable + explanation
   - `POST /compare` — 多商品 → 归一化排名 + 自然语言 summary（解释用 AI，计算不用）
   - `POST /contribute` — 上报 RawProduct 入中心库（众包，需轻量鉴权/限频）
-  - `GET /rankings` — 按品类/品牌/比价组取榜单（小程序主消费）
+  - `GET /rankings` — 按品类节点取榜单（小程序主消费）：`?category=<品类节点 slug>`（缺省 `beverage` root）按 `category_closure` 闭包取该节点子树的可排名成员（`rankable=true` ∧ 数据门），per100ml 升序分页
+  - `GET /categories` — 品类树浏览接口（小程序「分类树」Tab）：返回 store-agnostic 的 category is-a 树，每节点带继承解析的 `comparableUnit`、节点自身轴标记 `rankable` 与闭包后代可排名数 `rankableCount`（榜入口判定用 `rankableCount > 0`）
   - `POST /corrections` — 人工纠错（`parse_source=manual_corrected`，沉淀 few-shot 样本）
 - **公众 API 治理**：API key + 限频 + 用量统计。
 - **DB**：Cloudflare D1（SQLite）+ Drizzle ORM（CF 优先；schema 用 SQLite↔Postgres 可移植类型，撑爆 D1 时可平滑迁 Postgres）。表：`product_raw / product / unit_price / corrections`。（`product` 即规范商品表，承载商品身份而非仅 spec；`comparison_group` 不物化——对比组按 `docs/taxonomy-and-tagging.md` §九 改动态查询。品类 `tag` 系列表见该文档，由后续变更引入。）

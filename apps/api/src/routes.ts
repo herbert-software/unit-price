@@ -8,8 +8,8 @@
 import { Hono, type Context } from 'hono';
 import { z } from 'zod';
 import { ParsedSpecSchema, UnitPriceSchema, WarningsSchema, type RawProduct } from '@unit-price/core';
-import { RankingsResponseSchema } from '@unit-price/api-client';
-import type { Db, Repository } from '@unit-price/db';
+import { RankingsResponseSchema, CategoryTreeResponseSchema } from '@unit-price/api-client';
+import { CATEGORY_NODES, type Db, type Repository } from '@unit-price/db';
 import { orchestrate } from './orchestrate.js';
 import type { SpecParserLLM } from './llm.js';
 import type { AppEnv, Bindings } from './bindings.js';
@@ -147,6 +147,16 @@ export type BatchIngestResponse = z.infer<typeof BatchIngestResponseSchema>;
  */
 
 /**
+ * Accepted `category` slugs — the seed kind=category slug set, derived at COMPILE
+ * TIME from `packages/db`'s `CATEGORY_NODES` (the seed truth source). This is the
+ * ONLY slug list in apps/api: hand-writing a second one would let the API drift
+ * from the seed. Used to build `RankingsQuerySchema.category`'s `z.enum`. The
+ * `as [string, ...string[]]` assertion satisfies `z.enum`'s non-empty-tuple type
+ * (CATEGORY_NODES always seeds `beverage` and more).
+ */
+export const CATEGORY_SLUGS = CATEGORY_NODES.map((n) => n.slug) as [string, ...string[]];
+
+/**
  * GET /rankings query parameters. Query values arrive as strings. `limit` and
  * `offset` accept ONLY a decimal non-negative integer string (STRICT, symmetric):
  * a present value is gated by `^\d+$` BEFORE numeric conversion, so loose coercion
@@ -164,10 +174,19 @@ export type BatchIngestResponse = z.infer<typeof BatchIngestResponseSchema>;
  * just like empty `limit`, not silently treated as 0). A valid in-range-but-past-
  * the-end offset is a route-level concern (→ 200 + []), not a parse failure.
  *
- * `category`: `z.enum(['beverage'])` (CASE-SENSITIVE), default `beverage`. An
- * empty string `?category=` parses to `""`, which is NOT in the enum → rejected
- * (→ 400). This is a spelling guard + future-category placeholder; v1 in-ranking
- * eligibility is `per100ml IS NOT NULL`, not this field.
+ * `category` (CASE-SENSITIVE), default `beverage` (the root node slug). Present:
+ * MUST exactly match one seed kind=category node slug. The accepted set is
+ * `CATEGORY_SLUGS`, derived AT COMPILE TIME from `packages/db`'s `CATEGORY_NODES`
+ * (the seed truth) — apps/api does NOT hand-write a second slug list (would drift
+ * from seed). Validation is a pure synchronous parse (NO runtime `tag`-table
+ * lookup: that cannot tell a legal-but-unseeded slug apart from a typo). An
+ * unknown / non-category / wrong-case / empty `?category=` slug → 400 invalid-
+ * request. A slug that IS in the set but whose `tag` row is not seeded yet
+ * (migrate-before-seed window) is NOT a parse failure here: it passes the gate
+ * and the repository returns [] (→ 200), so a typo and an unseeded-but-legal slug
+ * stay distinguishable. The validated slug drives the closure filter
+ * (`category_closure.ancestor_tag_id = <that node>` + `product.rankable=1` +
+ * `per100ml IS NOT NULL`) inside listRankings.
  */
 export const RankingsQuerySchema = z.object({
   limit: z
@@ -185,7 +204,7 @@ export const RankingsQuerySchema = z.object({
     .pipe(z.number().int().nonnegative())
     .optional()
     .transform((n) => n ?? 0),
-  category: z.enum(['beverage']).default('beverage'),
+  category: z.enum(CATEGORY_SLUGS).default('beverage'),
 });
 
 export type RankingsQuery = z.infer<typeof RankingsQuerySchema>;
@@ -389,10 +408,12 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   // background task.
   app.get('/rankings', async (c) => {
     // ── Validate query params. Values arrive as strings; RankingsQuerySchema
-    //    coerces/clamps limit, validates offset, and enforces category=beverage
-    //    (case-sensitive). Any failure → 400 invalid-request, same shape/code as
-    //    the other endpoints. An out-of-range (but valid) offset is NOT a parse
-    //    failure — it falls through to listRankings, which returns [] (→ 200).
+    //    coerces/clamps limit, validates offset, and enforces category ∈ the seed
+    //    kind=category slug set (case-sensitive, default `beverage`/root). Any
+    //    failure → 400 invalid-request, same shape/code as the other endpoints.
+    //    An out-of-range (but valid) offset is NOT a parse failure — it falls
+    //    through to listRankings, which returns [] (→ 200). A legal-but-unseeded
+    //    slug also passes the gate and returns [] (→ 200), never a 400.
     const parsedQuery = RankingsQuerySchema.safeParse(c.req.query());
     if (!parsedQuery.success) {
       return c.json(
@@ -412,9 +433,12 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
     if (!resolved.ok) return resolved.response;
     const repo = resolved.value;
 
-    // ── Read the ascending per100ml slice. v1 does NOT push category to SQL
-    //    (no-op + index-preserving); it is passed through for the v2-reserved
-    //    signature. A throw → 500 persistence-error (no recompute, no retry).
+    // ── Read the ascending per100ml slice for the resolved category NODE: the
+    //    repository resolves the slug → its tag row and pushes down the closure
+    //    filter (`category_closure.ancestor_tag_id = <node>` + `product.rankable=1`
+    //    + `per100ml IS NOT NULL`). A legal-but-unseeded/non-category slug yields
+    //    [] (not an error). A throw → 500 persistence-error (no recompute, no
+    //    retry); per100ml/formula/confidence/warnings are stored values.
     let rows: Awaited<ReturnType<Repository['listRankings']>>;
     try {
       rows = await repo.listRankings({ limit, offset, category });
@@ -442,6 +466,41 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
     // ── Validate the response shape before returning (contract enforcement,
     //    mirrors /parse + /contribute). Failure → 500 internal.
     const validated = RankingsResponseSchema.safeParse(items);
+    if (!validated.success) {
+      return c.json({ error: 'internal', message: 'response failed validation' }, 500);
+    }
+    return c.json(validated.data, 200);
+  });
+
+  // GET /categories — public read-only category-tree browse (the store-agnostic
+  // category is-a tree the miniapp's "分类树" Tab renders). Like /rankings and
+  // /health it is EXEMPT from the governance chain: NO `app.use('/categories', …)`
+  // is mounted, so it takes no API key, consumes no rate-limit slot, and records
+  // no usage. Strictly READ-ONLY: it calls repo.listCategoryTree, wraps the nodes
+  // in `{ nodes }`, validates the contract, and returns — no write, no LLM, no
+  // background task, no outbound fetch. An unseeded taxonomy (DB connected, no
+  // kind=category rows) → 200 { nodes: [] }, never an error.
+  app.get('/categories', async (c) => {
+    // ── Resolve the repository (shared helper; null/throw → 500 persistence-
+    //    error, mirroring /rankings). Read-only — no write path is reachable.
+    const resolved = resolveRepo(c, deps);
+    if (!resolved.ok) return resolved.response;
+    const repo = resolved.value;
+
+    // ── Read the full kind=category tree (each node carries the inheritance-
+    //    resolved comparableUnit, its own `rankable` axis flag, and the closure-
+    //    descendant `rankableCount`). A throw → 500 persistence-error. An
+    //    unseeded taxonomy returns [] → 200 { nodes: [] }.
+    let nodes: Awaited<ReturnType<Repository['listCategoryTree']>>;
+    try {
+      nodes = await repo.listCategoryTree();
+    } catch {
+      return c.json({ error: 'persistence-error', message: 'failed to read categories' }, 500);
+    }
+
+    // ── Validate the response shape before returning (contract enforcement,
+    //    mirrors /rankings). Failure → 500 internal.
+    const validated = CategoryTreeResponseSchema.safeParse({ nodes });
     if (!validated.success) {
       return c.json({ error: 'internal', message: 'response failed validation' }, 500);
     }

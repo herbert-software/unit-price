@@ -119,6 +119,7 @@ category_closure          品类 is-a 闭包(tag 维度,非 product 维度——
 
 - **v1(随 `add-database` / Phase 3)**:tag 字典(kind + is-a + comparable_unit)、product_tag、store_category_map、category_closure;自动打标签 = tier1 规则 + 山姆 map(LLM 候选稍后)。
   - **v1 排名只支持 `per_100ml` 节点**(软饮全线):`comparable_unit` 字段虽落库,但 core 本期只算 per100ml(对齐 `unit-price-calc` 主规范「只产 per100ml」);非 per100ml 节点(酒类/root/未来纸品)`rankable=false`、不出榜。`per_100g`/`per_100sheet` 为 **v2 占位**,本期重量/纸品商品一律走 `unit-price-calc` 不可计算终态。
+  - **`rankable` 已接入 `/rankings`(节点作用域榜)**:`GET /rankings?category=<节点 slug>`(缺省 `beverage` root)按 `category_closure` 闭包取该节点子树成员,入榜判据收敛为**合取**——① 闭包命中目标节点 ∧ ② `product.rankable=true`(资格门:已分类叶 ∧ 该叶解析出非空可比单位)∧ ③ 数据门(单价列非空,**列由可排名成员所在轴决定**;v1 唯一可排名轴是 per_100ml,故对任一节点含 root 均为 `per100ml IS NOT NULL`)。两门各司其职、缺一不可:`rankable` 答「该不该上可比轴」、数据门答「是否真有该数」。`rankable=false` 行(酒类叶 `comparable_unit=null`、待人工/待细化软饮)**一律不入任何节点榜**——这同时修正了「按容量轴排序酒类」的语义错误。配套 `GET /categories` 输出 category is-a 树,每节点带继承解析的 `comparableUnit`、节点自身轴标记 `rankable` 与闭包后代可排名数 `rankableCount`(后者与节点榜基数逐字一致、与 `rankable` 正交:root `rankable=false` 但 `rankableCount>0`=默认榜基数)。
 - **v2**:LLM 候选打标签 + 白名单 guard;**eval 新增「品类标签准确率」维度**(见下);策展视图(无糖饮料等保存查询);跨店同款匹配;酒类/纸品等可比单位与计算扩展(届时 core 增 per_100g/per_100sheet 计算 + 解除 spec-parsing `category` 恒 beverage 约束)。
 
 ### eval「品类标签准确率」(是 eval-harness 的**新增需求**,非复用)
@@ -148,4 +149,5 @@ category_closure          品类 is-a 闭包(tag 维度,非 product 维度——
 | `comparison_group` 表(物化字符串分组) | category 闭包 ∧ attribute **动态查询** | **取代**:对比组不物化,改查询(`comparison_group` 表废弃) |
 | `comparable` / `excludedReason`(商品是否可比) | 不覆盖——仍由 core `comparability` 产出 | **并存正交**:本设计管「比哪组/按什么单位」,comparability 管「该商品能不能参与」(组合/赠品/规格缺失) |
 | `unit-price-calc` 本期**只产 per100ml**、不引入 comparable/comparisonGroup | `comparable_unit` 多值为 v2 | **衔接**:v1 仅 per100ml 节点可排名(对齐主规范);非 per100ml 字段只存不算,v2 再补计算 |
+| 节点榜入榜判据(P3 前两套并存:扁平榜「仅 `per100ml IS NOT NULL`」vs taxonomy 资格门) | `/rankings` 节点榜判据 = 闭包成员 ∧ `rankable=true` ∧ 数据门(列随节点轴,v1 一律 per100ml) | **收敛**:P3 起两套判据合一为**合取**;`rankable` 接入 `/rankings` 作资格门,数据门列由可排名成员轴决定;`/categories` 暴露品类树供浏览,`rankableCount` 与节点榜基数一致 |
 | `spec-parsing` `category` 恒 `beverage` | 打标签管线产真实品类 | **衔接**:v2 解除恒常量约束,改由管线/map 赋值 |

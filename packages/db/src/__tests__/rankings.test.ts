@@ -1,10 +1,13 @@
-// listRankings: read-only ranking projection over unit_price ⋈ product ⋈
-// product_raw. Pure SQLite/in-memory. Covers ascending order, per100ml-NULL
-// exclusion, same-value stability by unit_price.id, limit/offset slicing, an
-// empty db, the v1 category no-op (no SQL push-down), verbatim stored values,
-// the confidence-column provenance (unit_price.confidence, never
-// product.confidence), and a query-plan assertion that the primary order +
-// filter ride unit_price_per100ml_idx with no unit_price full scan.
+// listRankings: read-only NODE-SCOPED ranking projection over
+// unit_price ⋈ product ⋈ product_raw ⋈ product_tag ⋈ category_closure. Pure
+// SQLite/in-memory with the canonical taxonomy seeded. Covers ascending order,
+// per100ml-NULL exclusion, the rankable=1 gate (alcohol/待人工 excluded),
+// closure scoping (carbonated leaf vs soft-drink parent vs alcohol vs root),
+// double-leaf DISTINCT dedupe, same-value stability by unit_price.id,
+// limit/offset slicing, an empty db, a legal-but-unseeded slug → [], verbatim
+// stored values, the confidence-column provenance (unit_price.confidence, never
+// product.confidence), and a node-path query-plan assertion (the EXPLAIN
+// guardrail: category_closure + unit_price both SEARCH ... USING INDEX).
 import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
@@ -16,6 +19,7 @@ import {
   createRepository,
   type Repository,
 } from '../repository.js';
+import { seedTaxonomy } from '../seed.js';
 
 const migrationsFolder = fileURLToPath(
   new URL('../../drizzle', import.meta.url),
@@ -27,7 +31,7 @@ interface RankingsTestDb {
   repo: Repository;
 }
 
-function openDb(): RankingsTestDb {
+async function openDb(): Promise<RankingsTestDb> {
   const handle = new Database(':memory:');
   handle.pragma('foreign_keys = ON');
   const db = createDb(handle);
@@ -35,7 +39,17 @@ function openDb(): RankingsTestDb {
     throw new Error('test harness expected a better-sqlite3-backed Db');
   }
   migrate(db.orm, { migrationsFolder });
+  await seedTaxonomy(db);
   return { handle, db, repo: createRepository(db) };
+}
+
+/** Resolve a seeded tag's id by slug (for direct closure-edge inserts). */
+function tagId(handle: Database.Database, slug: string): string {
+  return (
+    handle.prepare('SELECT id FROM tag WHERE slug = ?').get(slug) as {
+      id: string;
+    }
+  ).id;
 }
 
 /**
@@ -43,6 +57,9 @@ function openDb(): RankingsTestDb {
  * each ranking row's columns are pinned independently — including the two
  * same-named `confidence` columns (product.confidence vs unit_price.confidence)
  * set to DIFFERENT values to prove the projection reads the authoritative one.
+ * `leaf` attaches one category LEAF edge (the membership path); `rankable`
+ * writes product.rankable. With no `leaf`, the product is 待人工 (no closure
+ * membership) — it never appears in any node board.
  */
 function seedRow(
   handle: Database.Database,
@@ -53,6 +70,8 @@ function seedRow(
     upConfidence: number;
     productConfidence: number;
     warnings: string; // JSON-text
+    leaf?: string | null; // category leaf slug to attach (membership)
+    rankable?: boolean;
     title?: string;
     priceCents?: number;
     store?: string;
@@ -69,6 +88,8 @@ function seedRow(
     upConfidence,
     productConfidence,
     warnings,
+    leaf = 'carbonated',
+    rankable = true,
     title = `title-${suffix}`,
     priceCents = 3990,
     store = 'sam',
@@ -85,22 +106,38 @@ function seedRow(
     .run(`raw-${suffix}`, store, storeSku, title, priceCents, sourceUrl, 1000);
   handle
     .prepare(
-      `INSERT INTO product (id, raw_id, multipliers, category, confidence, dedupe_key)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO product (id, raw_id, multipliers, category, confidence, dedupe_key, rankable)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(`prod-${suffix}`, `raw-${suffix}`, '[1]', category, productConfidence, `dk-${suffix}`);
+    .run(
+      `prod-${suffix}`,
+      `raw-${suffix}`,
+      '[1]',
+      category,
+      productConfidence,
+      `dk-${suffix}`,
+      rankable ? 1 : 0,
+    );
   handle
     .prepare(
       `INSERT INTO unit_price (id, product_id, per100ml, per100g, formula, confidence, warnings)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(`up-${suffix}`, `prod-${suffix}`, per100ml, per100g, formula, upConfidence, warnings);
+  if (leaf != null) {
+    handle
+      .prepare(
+        `INSERT INTO product_tag (id, product_id, tag_id, source, confidence)
+         VALUES (?, ?, ?, 'rule', 1)`,
+      )
+      .run(`pt-${suffix}`, `prod-${suffix}`, tagId(handle, leaf));
+  }
 }
 
-describe('listRankings', () => {
+describe('listRankings (node-scoped)', () => {
   let t: RankingsTestDb;
-  beforeEach(() => {
-    t = openDb();
+  beforeEach(async () => {
+    t = await openDb();
   });
 
   it('returns rows ascending by per100ml and excludes per100ml = NULL', async () => {
@@ -128,7 +165,8 @@ describe('listRankings', () => {
       productConfidence: 0.5,
       warnings: '[]',
     });
-    // per100ml NULL (weight-axis per100g-only / definitely uncomputable) — excluded.
+    // per100ml NULL (weight-axis per100g-only / definitely uncomputable) — excluded
+    // by the data gate even though it is rankable + a member.
     seedRow(t.handle, {
       suffix: 'nullml',
       per100ml: null,
@@ -148,6 +186,168 @@ describe('listRankings', () => {
     expect(rows.map((r) => r.per100ml)).toEqual([0.1, 0.5, 0.9]);
     // The NULL-per100ml row never appears.
     expect(rows.some((r) => r.id === 'up-nullml')).toBe(false);
+  });
+
+  it('excludes rankable=false rows (alcohol leaf with per100ml is gated out)', async () => {
+    // A rankable soft-drink and a rankable=false wine (alcohol leaf) that still
+    // has a non-null per100ml. The rankable gate keeps only the soft drink —
+    // the wine never rides the volume axis (fixes "sorting alcohol by volume").
+    seedRow(t.handle, {
+      suffix: 'soda',
+      per100ml: 0.3,
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      leaf: 'carbonated',
+      rankable: true,
+    });
+    seedRow(t.handle, {
+      suffix: 'wine',
+      per100ml: 0.2, // cheaper, yet excluded
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      leaf: 'wine',
+      rankable: false,
+    });
+    const root = await t.repo.listRankings({
+      limit: 50,
+      offset: 0,
+      category: 'beverage',
+    });
+    expect(root.map((r) => r.id)).toEqual(['up-soda']);
+    // The alcohol node board is empty (the rankable gate, not a special case).
+    expect(
+      await t.repo.listRankings({ limit: 50, offset: 0, category: 'alcohol' }),
+    ).toEqual([]);
+  });
+
+  it('excludes 待人工 rows (no category leaf → not a member of any node)', async () => {
+    // A rankable=true soft-drink with per100ml but NO category leaf is not a
+    // member of any node (not even root) — the "无叶 → 非成员" mechanism.
+    seedRow(t.handle, {
+      suffix: 'member',
+      per100ml: 0.4,
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      leaf: 'carbonated',
+      rankable: true,
+    });
+    seedRow(t.handle, {
+      suffix: 'manual',
+      per100ml: 0.1, // cheaper, yet excluded — no leaf
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      leaf: null,
+      rankable: true,
+    });
+    const root = await t.repo.listRankings({
+      limit: 50,
+      offset: 0,
+      category: 'beverage',
+    });
+    expect(root.map((r) => r.id)).toEqual(['up-member']);
+  });
+
+  it('scopes a leaf node to only its own members', async () => {
+    seedRow(t.handle, {
+      suffix: 'carb',
+      per100ml: 0.3,
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      leaf: 'carbonated',
+    });
+    seedRow(t.handle, {
+      suffix: 'water',
+      per100ml: 0.1,
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      leaf: 'drinking-water',
+    });
+    const carbonated = await t.repo.listRankings({
+      limit: 50,
+      offset: 0,
+      category: 'carbonated',
+    });
+    // Only the carbonated member; the drinking-water member is excluded.
+    expect(carbonated.map((r) => r.id)).toEqual(['up-carb']);
+  });
+
+  it('a parent node includes its sub-leaf members via the closure', async () => {
+    seedRow(t.handle, {
+      suffix: 'carb',
+      per100ml: 0.3,
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      leaf: 'carbonated',
+    });
+    seedRow(t.handle, {
+      suffix: 'water',
+      per100ml: 0.1,
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      leaf: 'drinking-water',
+    });
+    seedRow(t.handle, {
+      suffix: 'juice',
+      per100ml: 0.2,
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      leaf: 'juice-plant',
+    });
+    // soft-drink parent: closure pulls all three sub-leaf members, mixed ASC.
+    const softDrink = await t.repo.listRankings({
+      limit: 50,
+      offset: 0,
+      category: 'soft-drink',
+    });
+    expect(softDrink.map((r) => r.id)).toEqual(['up-water', 'up-juice', 'up-carb']);
+  });
+
+  it('a violated single-attribution (one product, two leaves under the node) lists it at most once', async () => {
+    // Defensive DISTINCT backstop: the invariant is app-layer, not a DB
+    // constraint, so inject a second category leaf directly. Both leaves are
+    // under soft-drink/root → the closure JOIN would otherwise emit the row
+    // twice. SELECT DISTINCT unit_price.id must collapse it to one.
+    seedRow(t.handle, {
+      suffix: 'dup',
+      per100ml: 0.3,
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      leaf: 'carbonated',
+    });
+    t.handle
+      .prepare(
+        `INSERT INTO product_tag (id, product_id, tag_id, source, confidence)
+         VALUES ('pt-dup2', 'prod-dup', ?, 'rule', 1)`,
+      )
+      .run(tagId(t.handle, 'juice-plant'));
+    for (const slug of ['beverage', 'soft-drink']) {
+      const rows = await t.repo.listRankings({
+        limit: 50,
+        offset: 0,
+        category: slug,
+      });
+      expect(rows.filter((r) => r.id === 'up-dup')).toHaveLength(1);
+    }
   });
 
   it('is stable by unit_price.id when per100ml ties', async () => {
@@ -245,47 +445,23 @@ describe('listRankings', () => {
     ).toEqual([]);
   });
 
-  it('does not push down category in v1 (passing category is a no-op)', async () => {
-    // v1 intentionally ignores the `category` input (it is a v2-reserved
-    // no-op): the WHERE filter is per100ml IS NOT NULL only, with no
-    // product.category predicate. Seed two different categories and prove BOTH
-    // rows come back regardless of the category passed — the result equals what
-    // a category-less query returns.
+  it('returns [] for a legal slug with no tag row (not an error)', async () => {
+    // Drop the carbonated tag's closure rows AND the tag row to simulate the
+    // migrate-before-seed window for one node. A query for it must return [] —
+    // never throw. (Slug legality / 400 is the API layer's job.)
     seedRow(t.handle, {
-      suffix: 'bev',
+      suffix: 'x',
       per100ml: 0.5,
       formula: 'f',
       upConfidence: 0.95,
       productConfidence: 0.5,
       warnings: '[]',
-      category: 'beverage',
+      leaf: 'carbonated',
     });
-    seedRow(t.handle, {
-      suffix: 'food',
-      per100ml: 0.3,
-      formula: 'f',
-      upConfidence: 0.95,
-      productConfidence: 0.5,
-      warnings: '[]',
-      category: 'food',
-    });
-    // Passing category='beverage' must NOT exclude the 'food' row — v1 returns
-    // every per100ml-non-null row in ascending order.
-    const withCategory = await t.repo.listRankings({
-      limit: 50,
-      offset: 0,
-      category: 'beverage',
-    });
-    expect(withCategory.map((r) => r.id)).toEqual(['up-food', 'up-bev']);
-    // A different category value yields the identical result set (no-op).
-    const otherCategory = await t.repo.listRankings({
-      limit: 50,
-      offset: 0,
-      category: 'food',
-    });
-    expect(otherCategory.map((r) => r.id)).toEqual(
-      withCategory.map((r) => r.id),
-    );
+    // A slug that simply does not exist as a tag row → [].
+    await expect(
+      t.repo.listRankings({ limit: 50, offset: 0, category: 'no-such-node' }),
+    ).resolves.toEqual([]);
   });
 
   it('returns per100ml/formula/warnings as stored values (no recompute)', async () => {
@@ -419,37 +595,41 @@ describe('listRankings', () => {
 });
 
 /**
- * Query-plan assertion. v1 drops the `product.category` predicate (it is a
- * no-op since every row is "beverage", and including it makes the planner drive
- * from `product` with a full SCAN + TEMP B-TREE and abandon the per100ml
- * index). Without it, the planner drives from `unit_price` via
- * `unit_price_per100ml_idx`, which satisfies both the per100ml IS NOT NULL
- * filter and the primary ASC order. We assert exactly that on the SQL the
- * repository actually emits (obtained via drizzle `.toSQL()` — same shape as
- * production, no `INDEXED BY` hint). A populated table + ANALYZE is required so
- * the planner's cost model prefers the index over a small-table scan.
- *
- * The secondary key `unit_price.id` is not covered by the single-column index,
- * so a "USE TEMP B-TREE FOR LAST TERM OF ORDER BY" may appear — that is
- * accepted (design D2) and deliberately NOT asserted against. What we forbid is
- * a full SCAN of `unit_price`.
+ * Query-plan assertion for the node-scoped path. The EXPLAIN guardrail (see
+ * `rankings-api`「节点路径的查询计划口径」) is: with stats (先 `ANALYZE`, pinned to
+ * match既有 P2 测试), the two BE-PROBED tables `category_closure` and
+ * `unit_price` must each be `SEARCH ... USING INDEX` (their respective unique
+ * indexes) — they must NOT degrade to a full SCAN. The driving table is a full
+ * SCAN (`product` with stats, or `product_tag` without) and is deliberately
+ * accepted (small tables); a `USE TEMP B-TREE` for ORDER BY / DISTINCT is also
+ * allowed. We assert by per-table substring match only — NOT a whole-plan
+ * equality / row-count assertion (post-`ANALYZE` plans add `BLOOM FILTER` /
+ * covering-index probes that drift). We deliberately do NOT assert "driven from
+ * closure/product_tag" (flips between `SCAN p` ↔ `SCAN pt` with ANALYZE) nor
+ * "no SCAN unit_price" (structurally near-tautological in this join shape).
+ * The SQL is the EXACT production query via the shared `buildRankingsQuery` +
+ * `.toSQL()` — it can never drift from a hand-built copy.
  */
-describe('listRankings query plan', () => {
-  it('drives from unit_price_per100ml_idx with no unit_price full scan', () => {
-    const t = openDb();
+describe('listRankings query plan (node path)', () => {
+  it('probes category_closure + unit_price via their unique indexes (category_closure not SCANned; unit_price guarded by its positive USING INDEX assertion)', async () => {
+    const t = await openDb();
+    const carbonatedId = tagId(t.handle, 'carbonated');
     const insRaw = t.handle.prepare(
       `INSERT INTO product_raw (id, store, store_sku, title, price, captured_at) VALUES (?,?,?,?,?,?)`,
     );
     const insProd = t.handle.prepare(
-      `INSERT INTO product (id, raw_id, multipliers, category, confidence, dedupe_key) VALUES (?,?,?,?,?,?)`,
+      `INSERT INTO product (id, raw_id, multipliers, category, confidence, dedupe_key, rankable) VALUES (?,?,?,?,?,?,?)`,
     );
     const insUp = t.handle.prepare(
       `INSERT INTO unit_price (id, product_id, per100ml, per100g, formula, confidence, warnings) VALUES (?,?,?,?,?,?,?)`,
     );
+    const insPt = t.handle.prepare(
+      `INSERT INTO product_tag (id, product_id, tag_id, source, confidence) VALUES (?,?,?,'rule',1)`,
+    );
     const tx = t.handle.transaction(() => {
       for (let i = 0; i < 300; i++) {
         insRaw.run(`r${i}`, 'sam', `sku${i}`, `t${i}`, 100 + i, 1000);
-        insProd.run(`p${i}`, `r${i}`, '[1]', 'beverage', 0.5, `dk${i}`);
+        insProd.run(`p${i}`, `r${i}`, '[1]', 'beverage', 0.5, `dk${i}`, 1);
         insUp.run(
           `u${i}`,
           `p${i}`,
@@ -459,21 +639,20 @@ describe('listRankings query plan', () => {
           0.95,
           '[]',
         );
+        insPt.run(`pt${i}`, `p${i}`, carbonatedId);
       }
     });
     tx();
-    // ANALYZE so the planner's cost model has table stats and prefers the index.
+    // ANALYZE so the planner's cost model has table stats (pinned, like P2).
     t.handle.exec('ANALYZE');
 
-    // The EXACT v1 SQL the repository emits — obtained from the SAME shared
+    // The EXACT node-scoped SQL the repository emits — from the SAME shared
     // builder listRankings uses (`buildRankingsQuery` + `.toSQL()`), so the
-    // EXPLAIN runs on the production query and can never drift from a hand-built
-    // copy when listRankings' JOIN/WHERE/ORDER changes.
+    // EXPLAIN runs on the production query and can never drift.
     const orm = drizzle(t.handle);
-    const { sql: prodSql, params } = buildRankingsQuery(orm, {
+    const { sql: prodSql, params } = buildRankingsQuery(orm, carbonatedId, {
       limit: 50,
       offset: 0,
-      category: 'beverage',
     }).toSQL();
 
     const plan = t.handle
@@ -481,16 +660,33 @@ describe('listRankings query plan', () => {
       .all(...params) as Array<{ detail: string }>;
     const details = plan.map((p) => p.detail);
 
-    // Primary order + per100ml-non-null filter ride the per100ml index.
+    // Guardrail: category_closure is SEARCHed via its unique index (not SCANned).
     expect(
       details.some((d) =>
-        /SEARCH\b.*\bunit_price\b.*USING INDEX unit_price_per100ml_idx/.test(d),
+        /SEARCH\b.*\bcategory_closure\b.*USING INDEX category_closure_tag_id_ancestor_tag_id_unique/.test(
+          d,
+        ),
       ),
     ).toBe(true);
-    // No full table SCAN of unit_price (a SCAN would mean the index was
-    // abandoned and rows would be sorted in a temp B-tree wholesale).
-    expect(details.some((d) => /\bSCAN\b\s+unit_price\b/.test(d))).toBe(false);
-    // Note: a TEMP B-TREE for the secondary key (up.id) is permitted (design
-    // D2) and intentionally not asserted against here.
+    // Guardrail: unit_price is SEARCHed via unit_price_product_id_unique.
+    expect(
+      details.some((d) =>
+        /SEARCH\b.*\bunit_price\b.*USING INDEX unit_price_product_id_unique/.test(
+          d,
+        ),
+      ),
+    ).toBe(true);
+    // category_closure is asserted NOT degraded to a full SCAN. unit_price needs
+    // no separate `!SCAN unit_price` — the positive `SEARCH unit_price USING INDEX
+    // unit_price_product_id_unique` assertion above already protects it (a row
+    // cannot be both SEARCHed-by-index and SCANned), and a standalone `!SCAN
+    // unit_price` is near-tautological in this join shape (per the spec).
+    expect(details.some((d) => /\bSCAN\b\s+category_closure\b/.test(d))).toBe(
+      false,
+    );
+    // (A SCAN of the driving table product/product_tag and a TEMP B-TREE for
+    // ORDER BY / DISTINCT are permitted and intentionally not asserted against.)
+
+    t.handle.close();
   });
 });
