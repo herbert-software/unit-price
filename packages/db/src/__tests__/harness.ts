@@ -8,6 +8,7 @@ import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { fileURLToPath } from 'node:url';
 import { createDb, type Db } from '../db.js';
 import { createRepository, type Repository } from '../repository.js';
+import { seedTaxonomy } from '../seed.js';
 
 export const migrationsFolder = fileURLToPath(
   new URL('../../drizzle', import.meta.url),
@@ -28,6 +29,14 @@ export function openTestDb(): TestDb {
   }
   migrate(db.orm, { migrationsFolder });
   return { handle, db, repo: createRepository(db) };
+}
+
+/** Like `openTestDb`, but with the canonical taxonomy seeded (tag tree, */
+/** attributes, closure, Sam store_category_map). */
+export async function openSeededTestDb(): Promise<TestDb> {
+  const test = openTestDb();
+  await seedTaxonomy(test.db);
+  return test;
 }
 
 export function countRows(handle: Database.Database, table: string): number {

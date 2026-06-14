@@ -7,3 +7,4 @@ export * from './tiers.js';
 export * from './consistency.js';
 export * from './parser.js';
 export * from './calculator.js';
+export * from './category-rules.js';
