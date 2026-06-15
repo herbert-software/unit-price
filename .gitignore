@@ -20,3 +20,4 @@ packages/eval/corpus/*
 
 # Playwright MCP verification artifacts (screenshots/logs), not source
 .playwright-mcp/
+.scratch/
