@@ -4,10 +4,13 @@ import { CategoryTreeResponseSchema } from './categories.js';
 import { buildCategoriesUrl, parseCategoryTreeResponse } from './client.js';
 import type { CategoryTreeNode } from './categories.js';
 
-// A representative tree: root (rankable=false but rankableCount>0, the default
-// ranking), a soft-drink parent + leaf (rankable=true via per_100ml), and an
-// alcohol node (rankable=false, rankableCount=0). Covers the inheritance-derived
-// distinctions the category-tree-api contract pins down.
+// A representative P3.5 tree: root `饮料` (rankable=false / null — NOT the default
+// board; the default is now the soft-drink cohort, and /rankings cohort-guards the
+// root to 400), a soft-drink leaf (rankable=true via per_100ml), and the `酒类`
+// PARENT (rankable=false / null — cross-cohort, cohort-guarded out — yet
+// rankableCount>0 because its 酒种 leaf descendants ARE rankable cohorts; a client
+// keys off `rankable`, not `rankableCount>0`, to decide 可点进). Covers the
+// inheritance-derived distinctions the category-tree-api contract pins down.
 const rootNode: CategoryTreeNode = {
   slug: 'beverage',
   name: '饮料',
@@ -30,12 +33,14 @@ const alcoholNode: CategoryTreeNode = {
   parentSlug: 'beverage',
   comparableUnit: null,
   rankable: false,
-  rankableCount: 0,
+  // P3.5: rankableCount>0 (酒种 leaf descendants are rankable) while rankable=false
+  // (cross-cohort parent, not 可点进). The canonical "count>0 ∧ rankable=false" case.
+  rankableCount: 153,
 };
 const validResponse = { nodes: [rootNode, softDrinkLeaf, alcoholNode] };
 
 describe('CategoryTreeResponseSchema', () => {
-  it('parses a valid tree: root rankable=false/count>0, soft-drink leaf, alcohol node', () => {
+  it('parses a valid tree: root rankable=false/count>0, soft-drink leaf, alcohol parent (count>0/rankable=false)', () => {
     expect(CategoryTreeResponseSchema.parse(validResponse)).toEqual(validResponse);
   });
 

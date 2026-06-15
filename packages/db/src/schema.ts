@@ -98,8 +98,9 @@ export const product = sqliteTable(
     ),
     /**
      * Derived (NOT a domain field, NOT in `dedupe_key`): true IFF the product is
-     * 已分类叶 AND that leaf resolves a non-null `comparable_unit` (v1 = per_100ml
-     * soft drinks). 待细化 / 待人工 / 酒类(comparable_unit=null) are all false.
+     * 已分类叶 AND that leaf resolves a non-null `comparable_unit` (per_100ml on
+     * the soft-drink line / dairy line / each 酒种 leaf). 待细化 / 待人工 (no leaf)
+     * are false; the `酒类` parent resolves null but is never a product's leaf.
      * Recomputed by every category-attribution write path; never read stale.
      *
      * Migration safety (B1/D8): added as `INTEGER NOT NULL DEFAULT 0` — the

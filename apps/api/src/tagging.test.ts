@@ -184,40 +184,74 @@ describe('tagProduct — store-map branches (3.1)', () => {
     expect(attr?.tags.find((t) => t.slug === 'carbonated')?.source).toBe('store-map');
   });
 
-  it('store-map alcohol leaf → classified-leaf (store-map source), pending NULL, rankable=false', async () => {
+  it('store-map alcohol leaf (tier1 miss, pure brand title) → classified-leaf store-map, pending NULL, rankable=TRUE', async () => {
     const { repo } = await openSeeded();
-    // Sam native 10012172 → beer (an alcohol LEAF, not a v1 soft-drink leaf).
+    // P3.5: this exercises the STORE-MAP-ONLY path, so the title must carry NO
+    // tier1 alcohol keyword (under P3.5 `啤酒` IS a tier1 beer keyword, so the old
+    // `某啤酒礼盒` would now decide at tier1, not store-map). `剑南春` is a pure
+    // brand name NOT in any tier1 rule list → tier1 misses → store-map (Sam native
+    // 10012164 → baijiu) is the only signal. baijiu binds comparable_unit=per_100ml
+    // (its own cohort), so the leaf is rankable=TRUE.
+    const title = '剑南春礼盒';
+    const id = await landProduct(repo, {
+      title,
+      price: 100,
+      store: 'sam',
+      storeSku: 'baijiu-box',
+      nativeCategoryId: '10012164',
+    });
+    const result = await tagProduct(repo, {
+      productId: id,
+      title,
+      store: 'sam',
+      nativeCategoryId: '10012164',
+    });
+    // An alcohol leaf is a determinate leaf (已分类叶), NOT 待细化 — pending must
+    // never point at a leaf. decidedBy is store-map (tier1 missed on the pure brand
+    // name). rankable=true because baijiu now resolves comparable_unit=per_100ml.
+    expect(result.verdict).toEqual({
+      verdict: 'leaf',
+      leafSlug: 'baijiu',
+      decidedBy: 'store-map',
+    });
+    expect(result.rankable).toBe(true);
+    const attr = await repo.getProductAttribution(id);
+    expect(attr?.state).toBe('classified-leaf');
+    expect(attr?.categoryLeafSlug).toBe('baijiu');
+    expect(attr?.pendingCategorySlug).toBeNull();
+    expect(attr?.rankable).toBe(true);
+    // Provenance: the leaf edge is sourced store-map.
+    expect(attr?.tags.find((t) => t.slug === 'baijiu')?.source).toBe('store-map');
+  });
+
+  it('tier1 alcohol keyword (啤酒) decides at tier1 → beer leaf, rankable=TRUE (no store-map needed)', async () => {
+    // P3.5 complement: `啤酒` IS a tier1 beer keyword, so a title carrying it
+    // decides at tier1 (decidedBy:'tier1'), independent of any store-map signal.
+    // beer binds comparable_unit=per_100ml → rankable=true.
+    const { repo } = await openSeeded();
     const title = '某啤酒礼盒';
     const id = await landProduct(repo, {
       title,
       price: 100,
       store: 'sam',
       storeSku: 'beer-box',
-      nativeCategoryId: '10012172',
     });
-    // Note: title has no soft-drink keyword (`啤酒` is not a tier1 leaf keyword).
     const result = await tagProduct(repo, {
       productId: id,
       title,
       store: 'sam',
-      nativeCategoryId: '10012172',
+      nativeCategoryId: null,
     });
-    // An alcohol leaf is a determinate leaf (已分类叶), NOT 待细化 — pending must
-    // never point at a leaf. rankable=false only because beer resolves
-    // comparable_unit null.
     expect(result.verdict).toEqual({
       verdict: 'leaf',
       leafSlug: 'beer',
-      decidedBy: 'store-map',
+      decidedBy: 'tier1',
     });
-    expect(result.rankable).toBe(false);
+    expect(result.rankable).toBe(true);
     const attr = await repo.getProductAttribution(id);
     expect(attr?.state).toBe('classified-leaf');
     expect(attr?.categoryLeafSlug).toBe('beer');
-    expect(attr?.pendingCategorySlug).toBeNull();
-    expect(attr?.rankable).toBe(false);
-    // Provenance: the leaf edge is sourced store-map.
-    expect(attr?.tags.find((t) => t.slug === 'beer')?.source).toBe('store-map');
+    expect(attr?.rankable).toBe(true);
   });
 
   it('store-map coarse (non-leaf) node → 待细化 pending pointing at the non-leaf', async () => {
@@ -398,11 +432,13 @@ describe('runBackfill — full stock, idempotent, no LLM (3.2/3.4)', () => {
     // Land a representative sample. Note the native ids are carried on
     // product_raw.category_hint for landing, but the backfill IGNORES them (it
     // feeds nativeCategoryId=null), so only tier1 keyword titles classify:
-    //   可口可乐  → tier1 carbonated (classified, rankable)
-    //   神秘饮料  + native 10003380   → store-map carbonated IF fed, but tier1 miss → 待人工
-    //   某啤酒礼盒 + native 10012172  → store-map beer IF fed, but tier1 miss → 待人工
-    //   神秘饮品盒 + native coarse    → store-map pending IF fed, but tier1 miss → 待人工
-    //   神秘赠品  → tier1 miss → 待人工
+    //   可口可乐   → tier1 carbonated (classified, rankable)
+    //   神秘饮料   + native 10003380  → store-map carbonated IF fed, but tier1 miss → 待人工
+    //   某啤酒礼盒  + native 10012172  → P3.5: `啤酒` IS a tier1 beer keyword → tier1
+    //                                   classifies BEER (no store-map needed); beer
+    //                                   binds per_100ml → classified, rankable
+    //   神秘饮品盒  + native coarse    → store-map pending IF fed, but tier1 miss → 待人工
+    //   神秘赠品   → tier1 miss → 待人工
     await landProduct(repo, { title: '可口可乐 330ml*24听', price: 40, store: 'sam', storeSku: 's-coke' });
     await landProduct(repo, { title: '神秘饮料 330ml*24', price: 30, store: 'sam', storeSku: 's-mystery', nativeCategoryId: '10003380' });
     await landProduct(repo, { title: '某啤酒礼盒', price: 100, store: 'sam', storeSku: 's-beer', nativeCategoryId: '10012172' });
@@ -411,12 +447,13 @@ describe('runBackfill — full stock, idempotent, no LLM (3.2/3.4)', () => {
 
     const first = await runBackfill(repo, db);
     expect(first.total).toBe(5);
-    // store-map LAZY: only the tier1 carbonated title classifies; every native-id
-    // -only product lands 待人工 (the seed rows are inert in the backfill).
-    expect(first.classified).toBe(1); // carbonated (tier1 only)
+    // store-map LAZY: native ids are never fed. tier1 classifies the carbonated
+    // title AND the 啤酒 title (P3.5 beer keyword); the remaining native-id-only /
+    // no-keyword products land 待人工 (the seed rows are inert in the backfill).
+    expect(first.classified).toBe(2); // carbonated + beer (both tier1)
     expect(first.pending).toBe(0); // coarse store-map never consulted
-    expect(first.manual).toBe(4); // mystery/beer/coarse/gift all tier1-miss
-    expect(first.rankable).toBe(1); // the carbonated leaf
+    expect(first.manual).toBe(3); // mystery/coarse/gift all tier1-miss
+    expect(first.rankable).toBe(2); // carbonated + beer (both bind per_100ml)
 
     // Snapshot the product_tag rows for idempotency comparison.
     const tagCountBefore = (handle.prepare('SELECT count(*) AS c FROM product_tag').get() as { c: number }).c;
@@ -424,10 +461,10 @@ describe('runBackfill — full stock, idempotent, no LLM (3.2/3.4)', () => {
     // Re-run on the same snapshot → identical summary + no duplicate edges.
     const second = await runBackfill(repo, db);
     expect(second.total).toBe(5);
-    expect(second.classified).toBe(1);
+    expect(second.classified).toBe(2);
     expect(second.pending).toBe(0);
-    expect(second.manual).toBe(4);
-    expect(second.rankable).toBe(1);
+    expect(second.manual).toBe(3);
+    expect(second.rankable).toBe(2);
     const tagCountAfter = (handle.prepare('SELECT count(*) AS c FROM product_tag').get() as { c: number }).c;
     expect(tagCountAfter).toBe(tagCountBefore);
 

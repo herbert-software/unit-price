@@ -21,18 +21,26 @@ import { ComparableUnitSchema } from '@unit-price/core';
  *    `ComparableUnit` enum the write path / core use (no divergent string set).
  *  - `comparableUnit`: the comparable unit AFTER is-a inheritance resolution
  *    (node's own `comparable_unit`, else the nearest non-empty ancestor; `null`
- *    all the way to root). Soft-drink line resolves to `per_100ml`; alcohol /
- *    root resolve to `null`. NEVER the raw un-inherited column value.
- *  - `rankable`: whether the node ITSELF carries a comparable unit
- *    (`comparableUnit !== null`) — i.e. whether it is itself a sort axis. This
- *    flag is ORTHOGONAL to whether the node's closure has rankable members
- *    (`rankableCount`); the two are not inter-derivable. Consumers MUST decide
- *    "is this node clickable into a ranking" by `rankableCount > 0`, NOT by
- *    `rankable` (root `beverage` is `rankable=false` but is the default ranking).
+ *    all the way to root). The soft-drink line, the dairy line, and EACH alcohol
+ *    leaf (`白酒`/`葡萄酒`/`洋酒`/`威士忌`/`啤酒`/`清酒果酒`) resolve to `per_100ml`;
+ *    the `alcohol` PARENT and root `beverage` resolve to `null`. NEVER the raw
+ *    un-inherited column value.
+ *  - `rankable`: whether the node ITSELF carries a (resolved) comparable unit
+ *    (`comparableUnit !== null`) — equivalently, whether the node is a single
+ *    comparable cohort that is clickable into a ranking board. Consumers MUST
+ *    decide "is this node clickable into a ranking" by `node.rankable`, NOT by
+ *    `rankableCount > 0`: the `alcohol` parent has `rankableCount > 0` (it has
+ *    rankable 酒种 leaf descendants) but `rankable=false` and is NOT clickable —
+ *    `GET /rankings?category=alcohol` returns `400` (cohort guard). `true` for
+ *    soft-drink / its leaves / dairy / its leaves / each alcohol leaf; `false`
+ *    for root `beverage` and the `alcohol` parent.
  *  - `rankableCount`: count of rankable members under the node's closure
- *    (non-negative integer). Equals the basis of `GET /rankings?category=<slug>`
- *    for that node (and, for root, the default `/rankings` basis). Orthogonal to
- *    `rankable`: root is `rankable=false` yet `rankableCount > 0`.
+ *    (non-negative integer). For a `rankable=true` (clickable) node it equals the
+ *    basis of `GET /rankings?category=<slug>` for that node. For a `rankable=false`
+ *    node (root `beverage` / `alcohol` parent — both rejected by `/rankings` with
+ *    `400`) it is an informational branch count of rankable descendants with NO
+ *    corresponding board. Orthogonal to `rankable`: the `alcohol` parent is
+ *    `rankable=false` yet `rankableCount > 0`.
  */
 export const CategoryTreeNodeSchema = z.object({
   slug: z.string().min(1),

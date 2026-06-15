@@ -67,30 +67,47 @@ async function insertProduct(
 }
 
 describe('seed: canonical category tree', () => {
-  it('seeds soft-drink leaves inheriting per_100ml and alcohol null', async () => {
+  it('resolves per_100ml on soft-drink/dairy/酒种 leaves; null on beverage/alcohol parents (P3.5)', async () => {
     const t = await openSeededTestDb();
     // 软饮 leaves inherit per_100ml (bound once on 软饮, not per-leaf).
     for (const leaf of ['carbonated', 'juice-plant', 'coffee-tea', 'drinking-water']) {
       expect(await t.repo.resolveComparableUnit(leaf)).toBe('per_100ml');
     }
     expect(await t.repo.resolveComparableUnit('soft-drink')).toBe('per_100ml');
-    // root + alcohol subtree resolve null.
+    // 乳品 subtree: 乳品 binds per_100ml, leaves inherit.
+    expect(await t.repo.resolveComparableUnit('dairy')).toBe('per_100ml');
+    for (const leaf of ['milk', 'yogurt', 'lactic-drink']) {
+      expect(await t.repo.resolveComparableUnit(leaf)).toBe('per_100ml');
+    }
+    // Each 酒种 leaf binds per_100ml on the leaf itself (its own cohort).
+    for (const leaf of ['baijiu', 'wine', 'spirits', 'whisky', 'beer', 'sake-fruit-wine']) {
+      expect(await t.repo.resolveComparableUnit(leaf)).toBe('per_100ml');
+    }
+    // Only the cross-cohort parents resolve null: root 饮料 and 酒类 parent.
     expect(await t.repo.resolveComparableUnit('beverage')).toBeNull();
     expect(await t.repo.resolveComparableUnit('alcohol')).toBeNull();
-    expect(await t.repo.resolveComparableUnit('baijiu')).toBeNull();
-    expect(await t.repo.resolveComparableUnit('wine')).toBeNull();
   });
 
-  it('binds comparable_unit on exactly one node (软饮), via inheritance', async () => {
+  it('self-binds comparable_unit on exactly the 8 P3.5 nodes (软饮 + 乳品 + 6 酒种叶)', async () => {
     const t = await openSeededTestDb();
-    // Only 软饮 carries a stored comparable_unit; every other node is NULL in
-    // the row and resolves by walking up.
+    // Self-binding = the `tag.comparable_unit` COLUMN is non-null (NOT
+    // inheritance-resolved non-null). Soft-drink/dairy leaves carry NULL in the
+    // row and inherit, so they are NOT among these 8.
     const rows = t.handle
       .prepare(
         'SELECT slug FROM tag WHERE comparable_unit IS NOT NULL ORDER BY slug',
       )
       .all() as Array<{ slug: string }>;
-    expect(rows.map((r) => r.slug)).toEqual(['soft-drink']);
+    expect(rows.map((r) => r.slug)).toEqual([
+      'baijiu',
+      'beer',
+      'dairy',
+      'sake-fruit-wine',
+      'soft-drink',
+      'spirits',
+      'whisky',
+      'wine',
+    ]);
   });
 
   it('seed is idempotent — re-running produces no duplicate rows', async () => {
@@ -169,6 +186,44 @@ describe('category_closure: full ancestor membership', () => {
       .map((p) => p.ancestorSlug)
       .sort();
     expect(carb).toEqual(['beverage', 'carbonated', 'soft-drink']);
+  });
+
+  it('closure includes 乳品/酒种 leaves chained to their own ancestors (P3.5)', () => {
+    const pairs = computeClosurePairs();
+    const ancestorsOf = (slug: string) =>
+      pairs
+        .filter((p) => p.tagSlug === slug)
+        .map((p) => p.ancestorSlug)
+        .sort();
+    // milk → milk, dairy, beverage.
+    expect(ancestorsOf('milk')).toEqual(['beverage', 'dairy', 'milk']);
+    // baijiu → baijiu, alcohol, beverage.
+    expect(ancestorsOf('baijiu')).toEqual(['alcohol', 'baijiu', 'beverage']);
+  });
+
+  it('乳品/酒种 leaves are members of their own node AND their ancestors (closure)', async () => {
+    const milkPid = await insertProduct(t.repo, 'MM 纯牛奶 1L');
+    await t.repo.attachTag({
+      productId: milkPid,
+      tagSlug: 'milk',
+      source: 'rule',
+      confidence: 0.9,
+    });
+    expect(await t.repo.listProductIdsInCategoryNode('milk')).toEqual([milkPid]);
+    expect(await t.repo.listProductIdsInCategoryNode('dairy')).toEqual([milkPid]);
+    expect(await t.repo.listProductIdsInCategoryNode('beverage')).toEqual([milkPid]);
+
+    const beerPid = await insertProduct(t.repo, '青岛啤酒 500ml');
+    await t.repo.attachTag({
+      productId: beerPid,
+      tagSlug: 'beer',
+      source: 'rule',
+      confidence: 0.9,
+    });
+    expect(await t.repo.listProductIdsInCategoryNode('beer')).toEqual([beerPid]);
+    expect(await t.repo.listProductIdsInCategoryNode('alcohol')).toEqual([beerPid]);
+    // beer is NOT a member of a sibling 酒种 node.
+    expect(await t.repo.listProductIdsInCategoryNode('wine')).toEqual([]);
   });
 });
 
@@ -294,7 +349,9 @@ describe('three-state field-discriminability + rankable', () => {
     expect(attr?.rankable).toBe(false);
   });
 
-  it('alcohol leaf resolves null unit → rankable false even when classified', async () => {
+  it('酒种 leaf (per_100ml) classified → rankable true (P3.5)', async () => {
+    // P3.5: each 酒种 leaf binds per_100ml, so a product classified to it is
+    // rankable (the cross-cohort guard lives in the API, not in rankable).
     const pid = await insertProduct(t.repo, '茅台 飞天 500ml');
     await t.repo.attachTag({
       productId: pid,
@@ -303,11 +360,27 @@ describe('three-state field-discriminability + rankable', () => {
       confidence: 0.9,
     });
     const unit = await t.repo.resolveComparableUnit('baijiu');
-    expect(unit).toBeNull();
+    expect(unit).toBe('per_100ml');
     await t.repo.setRankable(pid, unit != null);
     const attr = await t.repo.getProductAttribution(pid);
     expect(attr?.state).toBe('classified-leaf');
-    expect(attr?.rankable).toBe(false);
+    expect(attr?.rankable).toBe(true);
+  });
+
+  it('乳品 leaf (per_100ml inherited) classified → rankable true (P3.5)', async () => {
+    const pid = await insertProduct(t.repo, 'MM 全脂纯牛奶 1L');
+    await t.repo.attachTag({
+      productId: pid,
+      tagSlug: 'milk',
+      source: 'rule',
+      confidence: 0.9,
+    });
+    const unit = await t.repo.resolveComparableUnit('milk');
+    expect(unit).toBe('per_100ml');
+    await t.repo.setRankable(pid, unit != null);
+    const attr = await t.repo.getProductAttribution(pid);
+    expect(attr?.state).toBe('classified-leaf');
+    expect(attr?.rankable).toBe(true);
   });
 
   it('pending → classified leaf transition clears pending (no越界态)', async () => {
@@ -829,15 +902,22 @@ describe('independent primitive guards (kind + existence)', () => {
 });
 
 describe('seed parity: 0004 DML migration ≡ seedTaxonomy()', () => {
-  /** Apply the 0004 seed SQL onto an already-migrated handle. */
-  function apply0004(handle: Database.Database): void {
+  /** Apply a hand-written DML seed migration SQL onto an already-migrated handle. */
+  function applySeedMigration(handle: Database.Database, file: string): void {
     const sqlPath = fileURLToPath(
-      new URL('../../drizzle/0004_seed_taxonomy.sql', import.meta.url),
+      new URL(`../../drizzle/${file}`, import.meta.url),
     );
     const sql = fsReadFileSync(sqlPath, 'utf8');
     for (const stmt of sql.split('--> statement-breakpoint')) {
       if (stmt.trim()) handle.exec(stmt);
     }
+  }
+
+  /** Apply the full DML seed (0004 base tree + 0005 dairy/alcohol P3.5 delta),
+   *  the order wrangler's directory scan applies them in. */
+  function apply0004(handle: Database.Database): void {
+    applySeedMigration(handle, '0004_seed_taxonomy.sql');
+    applySeedMigration(handle, '0005_seed_dairy_alcohol_units.sql');
   }
 
   function readTags(handle: Database.Database) {
@@ -1000,6 +1080,95 @@ describe('seed parity: 0004 DML migration ≡ seedTaxonomy()', () => {
     expect(countRows(b.handle, 'tag')).toBe(before.tag);
     expect(countRows(b.handle, 'category_closure')).toBe(before.closure);
     expect(countRows(b.handle, 'store_category_map')).toBe(before.map);
+    b.handle.close();
+  });
+
+  // P3.5 drift guard. The "double-fresh equivalence" tests above are BLIND to
+  // the existing-row flip: on a fresh DB both writers create the 酒种 leaf rows
+  // with per_100ml from the start. The real prod hazard is a DB already carrying
+  // the OLD P3 tree (酒种 leaves at comparable_unit=NULL, no dairy). Here we
+  // preset exactly that, then drive each path and assert BOTH converge the 酒种
+  // leaves NULL→per_100ml (INSERT OR IGNORE / onConflictDoNothing alone would
+  // not — the explicit UPDATE must).
+  function presetOldP3Tree(handle: Database.Database): void {
+    applySeedMigration(handle, '0004_seed_taxonomy.sql');
+    // Sanity: the preset really has the old state (NULL on 酒种 leaves, no dairy).
+    const before = handle
+      .prepare(
+        "SELECT comparable_unit AS u FROM tag WHERE slug = 'baijiu'",
+      )
+      .get() as { u: string | null };
+    expect(before.u).toBeNull();
+    expect(
+      handle.prepare("SELECT id FROM tag WHERE slug = 'dairy'").get(),
+    ).toBeUndefined();
+  }
+
+  function alcoholLeafUnits(handle: Database.Database): Array<string | null> {
+    return (
+      handle
+        .prepare(
+          "SELECT comparable_unit AS u FROM tag WHERE slug IN ('baijiu','wine','spirits','whisky','beer','sake-fruit-wine') ORDER BY slug",
+        )
+        .all() as Array<{ u: string | null }>
+    ).map((r) => r.u);
+  }
+
+  it('preset old P3 tree → 0005 migration flips 酒种 leaves NULL→per_100ml + adds dairy', async () => {
+    const t = openTestDb();
+    presetOldP3Tree(t.handle);
+    applySeedMigration(t.handle, '0005_seed_dairy_alcohol_units.sql');
+    // All 6 酒种 leaves converged to per_100ml.
+    expect(alcoholLeafUnits(t.handle)).toEqual(Array(6).fill('per_100ml'));
+    // Dairy subtree present; 乳品 binds per_100ml, leaves inherit (column NULL).
+    const dairy = t.handle
+      .prepare("SELECT comparable_unit AS u FROM tag WHERE slug = 'dairy'")
+      .get() as { u: string | null };
+    expect(dairy.u).toBe('per_100ml');
+    for (const leaf of ['milk', 'yogurt', 'lactic-drink']) {
+      const row = t.handle
+        .prepare('SELECT comparable_unit AS u FROM tag WHERE slug = ?')
+        .get(leaf) as { u: string | null };
+      expect(row.u).toBeNull();
+    }
+    expect(t.handle.pragma('foreign_key_check')).toEqual([]);
+    t.handle.close();
+  });
+
+  it('preset old P3 tree → seedTaxonomy() flips 酒种 leaves NULL→per_100ml + adds dairy', async () => {
+    const t = openTestDb();
+    presetOldP3Tree(t.handle);
+    await seedTaxonomy(t.db);
+    expect(alcoholLeafUnits(t.handle)).toEqual(Array(6).fill('per_100ml'));
+    const dairy = t.handle
+      .prepare("SELECT comparable_unit AS u FROM tag WHERE slug = 'dairy'")
+      .get() as { u: string | null };
+    expect(dairy.u).toBe('per_100ml');
+    // seedTaxonomy's two-pass insert must NOT have clobbered an existing row's
+    // parent/name (the explicit UPDATE only touches comparable_unit).
+    const wine = t.handle
+      .prepare(
+        `SELECT c.name AS name, p.slug AS parentSlug
+         FROM tag c LEFT JOIN tag p ON p.id = c.parent_id WHERE c.slug = 'wine'`,
+      )
+      .get() as { name: string; parentSlug: string | null };
+    expect(wine).toEqual({ name: '葡萄酒', parentSlug: 'alcohol' });
+    expect(t.handle.pragma('foreign_key_check')).toEqual([]);
+    t.handle.close();
+  });
+
+  it('preset old P3 tree → both paths converge to the SAME tree (migration ≡ seedTaxonomy on existing rows)', async () => {
+    const a = openTestDb();
+    presetOldP3Tree(a.handle);
+    applySeedMigration(a.handle, '0005_seed_dairy_alcohol_units.sql');
+
+    const b = openTestDb();
+    presetOldP3Tree(b.handle);
+    await seedTaxonomy(b.db);
+
+    expect(readTags(a.handle)).toEqual(readTags(b.handle));
+    expect(readClosure(a.handle)).toEqual(readClosure(b.handle));
+    a.handle.close();
     b.handle.close();
   });
 });

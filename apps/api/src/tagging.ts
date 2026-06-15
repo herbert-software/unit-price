@@ -63,8 +63,8 @@ export interface TagProductResult {
  * Resolve the repository's `lookupStoreCategory` result into the core arbiter's
  * `StoreMapResult`. A store-map hit on a LEAF (any category leaf — soft-drink
  * OR alcohol) is a `leaf` verdict; the leaf's comparability/rankability is
- * decided downstream by the DB tree (an alcohol leaf resolves comparable_unit
- * null → rankable=false, but is still 已分类叶, not 待细化). A hit on a coarse
+ * decided downstream by the DB tree (each 酒种 leaf now binds comparable_unit
+ * per_100ml → rankable=true, 已分类叶 in its own cohort, not 待细化). A hit on a coarse
  * (non-leaf) node → `coarse` → 待细化 (pending must point at a non-leaf). A
  * non-category tag or an unmapped native id → `none`.
  *
@@ -119,8 +119,8 @@ export async function tagProduct(
 
   // 4. Derive the three-state target + rankable from the verdict. These are
   // reads only — the actual writes happen atomically in step 5. rankable =
-  // classified-leaf AND that leaf resolves a non-null comparable_unit (v1 =
-  // per_100ml soft drinks); 待细化 / 待人工 / 酒类(null) → false.
+  // classified-leaf AND that leaf resolves a non-null comparable_unit (per_100ml
+  // on soft-drink / dairy / each 酒种 leaf); 待细化 / 待人工 (no leaf) → false.
   const leafSlug = verdict.verdict === 'leaf' ? verdict.leafSlug : null;
   const pendingNodeSlug =
     verdict.verdict === 'pending' ? verdict.pendingNodeSlug : null;

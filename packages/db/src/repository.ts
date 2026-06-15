@@ -314,8 +314,8 @@ export interface Repository {
    * that node's tag) ∧ `product.rankable = 1` ∧ `per100ml IS NOT NULL`,
    * `SELECT DISTINCT` on `unit_price.id` (double-leaf dedupe backstop, mirrors
    * `listProductIdsInCategoryNode`), ascending by per100ml then unit_price.id,
-   * sliced by limit/offset. `category` is the node slug (default root
-   * `beverage`); a slug with no `tag` row yields []. Pure read — no writes, no
+   * sliced by limit/offset. `category` is the node slug (the API layer defaults
+   * it to `soft-drink`); a slug with no `tag` row yields []. Pure read — no writes, no
    * parse/calc, no recompute. Stored per100ml/formula/confidence are returned
    * verbatim; warnings are decoded to string[].
    */
@@ -329,7 +329,8 @@ export interface Repository {
    * `comparableUnit !== null` (the node's own axis flag). `rankableCount` is
    * `COUNT(DISTINCT product.id)` over the SAME filter fragment as the node board
    * (closure member ∧ rankable=1 ∧ per100ml NOT NULL) — orthogonal to the
-   * node's own `rankable` (root `beverage` is rankable=false yet count>0). No
+   * node's own `rankable` (root `beverage` and the `alcohol` parent are both
+   * rankable=false yet count>0). No
    * category rows → empty (not an error). Pure read.
    */
   listCategoryTree(): Promise<CategoryTreeNode[]>;
@@ -991,9 +992,9 @@ export function createRepository(db: Db | null | undefined): Repository {
         // rankableCount uses the SAME filter fragment as the node board
         // (buildRankableCountQuery → applyNodeRankingFilter), so the count can
         // never drift from the board's row count. It is orthogonal to the node's own
-        // `rankable`: root `beverage` (rankable=false) still counts its
-        // rankable soft-drink descendants (count > 0); only a subtree with no
-        // rankable members (alcohol) counts 0.
+        // `rankable`: root `beverage` and the `alcohol` parent (both
+        // rankable=false) still count their rankable descendants (count > 0);
+        // only a subtree with genuinely no rankable descendants counts 0.
         const countRows = await buildRankableCountQuery(orm, n.id);
         out.push({
           slug: n.slug,

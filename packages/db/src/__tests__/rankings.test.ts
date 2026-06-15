@@ -1,7 +1,9 @@
 // listRankings: read-only NODE-SCOPED ranking projection over
 // unit_price ⋈ product ⋈ product_raw ⋈ product_tag ⋈ category_closure. Pure
 // SQLite/in-memory with the canonical taxonomy seeded. Covers ascending order,
-// per100ml-NULL exclusion, the rankable=1 gate (alcohol/待人工 excluded),
+// per100ml-NULL exclusion, the rankable=1 gate (rankable=false/待人工 excluded;
+// P3.5: 酒种/乳品 叶 members ARE rankable + cohort-scoped, cross-cohort 酒类/root
+// rejection is the API cohort guard, not the repo),
 // closure scoping (carbonated leaf vs soft-drink parent vs alcohol vs root),
 // double-leaf DISTINCT dedupe, same-value stability by unit_price.id,
 // limit/offset slicing, an empty db, a legal-but-unseeded slug → [], verbatim
@@ -188,10 +190,12 @@ describe('listRankings (node-scoped)', () => {
     expect(rows.some((r) => r.id === 'up-nullml')).toBe(false);
   });
 
-  it('excludes rankable=false rows (alcohol leaf with per100ml is gated out)', async () => {
-    // A rankable soft-drink and a rankable=false wine (alcohol leaf) that still
-    // has a non-null per100ml. The rankable gate keeps only the soft drink —
-    // the wine never rides the volume axis (fixes "sorting alcohol by volume").
+  it('excludes rankable=false rows (the rankable gate, not a special-cased leaf)', async () => {
+    // A rankable soft-drink and a rankable=false carbonated row that still has a
+    // non-null per100ml (e.g. 待细化/manual-corrected to unrankable). The rankable
+    // gate keeps only the rankable one — purely the product.rankable column, no
+    // leaf-specific special case. (P3.5: 酒种 leaves are themselves rankable; the
+    // cross-cohort exclusion of 酒类/root moves to the API cohort guard, not here.)
     seedRow(t.handle, {
       suffix: 'soda',
       per100ml: 0.3,
@@ -203,25 +207,108 @@ describe('listRankings (node-scoped)', () => {
       rankable: true,
     });
     seedRow(t.handle, {
+      suffix: 'ungated',
+      per100ml: 0.2, // cheaper, yet excluded — product.rankable = 0
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      leaf: 'carbonated',
+      rankable: false,
+    });
+    const board = await t.repo.listRankings({
+      limit: 50,
+      offset: 0,
+      category: 'carbonated',
+    });
+    expect(board.map((r) => r.id)).toEqual(['up-soda']);
+  });
+
+  it('酒种 leaf members are rankable and cohort-scoped (P3.5: beer board only beer)', async () => {
+    // P3.5: 酒种 leaves bind per_100ml → their members ARE rankable and appear in
+    // their own cohort board. A beer and a wine: the beer board carries only the
+    // beer (cohort scoping), and listRankings('alcohol') returns its closure +
+    // rankable members (no longer empty — the cross-cohort REJECTION is the API's
+    // cohort guard returning 400, not the repository returning []).
+    seedRow(t.handle, {
+      suffix: 'beer',
+      per100ml: 0.5,
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      leaf: 'beer',
+      rankable: true,
+    });
+    seedRow(t.handle, {
       suffix: 'wine',
-      per100ml: 0.2, // cheaper, yet excluded
+      per100ml: 0.3,
       formula: 'f',
       upConfidence: 0.95,
       productConfidence: 0.5,
       warnings: '[]',
       leaf: 'wine',
-      rankable: false,
+      rankable: true,
     });
-    const root = await t.repo.listRankings({
+    // beer cohort board: only the beer (wine excluded — different 酒种 cohort).
+    const beerBoard = await t.repo.listRankings({
       limit: 50,
       offset: 0,
-      category: 'beverage',
+      category: 'beer',
     });
-    expect(root.map((r) => r.id)).toEqual(['up-soda']);
-    // The alcohol node board is empty (the rankable gate, not a special case).
-    expect(
-      await t.repo.listRankings({ limit: 50, offset: 0, category: 'alcohol' }),
-    ).toEqual([]);
+    expect(beerBoard.map((r) => r.id)).toEqual(['up-beer']);
+    // wine cohort board: only the wine.
+    const wineBoard = await t.repo.listRankings({
+      limit: 50,
+      offset: 0,
+      category: 'wine',
+    });
+    expect(wineBoard.map((r) => r.id)).toEqual(['up-wine']);
+    // alcohol parent: closure + rankable returns BOTH (no longer empty). The API
+    // cohort guard (not the repo) rejects this cross-cohort node with 400.
+    const alcoholBoard = await t.repo.listRankings({
+      limit: 50,
+      offset: 0,
+      category: 'alcohol',
+    });
+    expect(alcoholBoard.map((r) => r.id).sort()).toEqual(['up-beer', 'up-wine']);
+  });
+
+  it('乳品 leaf members are rankable and cohort-scoped (P3.5: milk board only milk)', async () => {
+    seedRow(t.handle, {
+      suffix: 'milk',
+      per100ml: 1.2,
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      leaf: 'milk',
+      rankable: true,
+    });
+    seedRow(t.handle, {
+      suffix: 'soda',
+      per100ml: 0.3,
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      leaf: 'carbonated',
+      rankable: true,
+    });
+    // 乳品 board carries only the milk; the soft-drink is a different cohort.
+    const dairyBoard = await t.repo.listRankings({
+      limit: 50,
+      offset: 0,
+      category: 'dairy',
+    });
+    expect(dairyBoard.map((r) => r.id)).toEqual(['up-milk']);
+    // milk leaf board: also just the milk.
+    const milkBoard = await t.repo.listRankings({
+      limit: 50,
+      offset: 0,
+      category: 'milk',
+    });
+    expect(milkBoard.map((r) => r.id)).toEqual(['up-milk']);
   });
 
   it('excludes 待人工 rows (no category leaf → not a member of any node)', async () => {

@@ -83,20 +83,28 @@ category_closure          品类 is-a 闭包(tag 维度,非 product 维度——
 饮料(root,comparable_unit=null)
 ├ 软饮  comparable_unit = per_100ml   ← 单点绑定,下面全部继承
 │  ├ 碳酸饮料        (含糖汽水:可乐/汽水/雪碧)
-│  ├ 果汁/植物饮     (常温果汁 / 植物饮)
+│  ├ 果汁/植物饮     (常温果汁 / 植物饮 / 植物奶:椰子水/燕麦奶/豆浆)
 │  ├ 咖啡/茶饮       (茶饮 / 咖啡饮料 / 能量饮料)
 │  └ 饮用水          (本期单叶;气泡·电解质等子分待细化,见 §八)   ← 气泡水归此 + attribute:气泡
-└ 酒类  comparable_unit = null(本期不出榜)
-   ├ 白酒 / 葡萄酒 / 洋酒 / 威士忌 / 啤酒 / 清酒果酒
-   └ 酒类可比口径(每100ml? +度数? 单独榜)待样本到位定;本期 rankable=false
+├ 乳品  comparable_unit = per_100ml   ← 单点绑定,叶继承(与软饮同范式;植物奶不在此、归软饮)
+│  ├ 牛奶            (纯牛奶/鲜牛奶/灭菌乳/巴氏/风味奶)
+│  ├ 酸奶            (酸牛奶)
+│  └ 乳酸菌饮料      (活菌型)
+└ 酒类  comparable_unit = null(父节点不绑;跨多个酒种 cohort,不出混榜)
+   └ 白酒 / 葡萄酒 / 洋酒 / 威士忌 / 啤酒 / 清酒果酒   ← 各酒种叶**各自**绑 comparable_unit = per_100ml,
+      每叶 = 一个独立可排名 cohort(`spirits` 与 `whisky` 分两叶);酒类父因解析单位 null 由 rankings cohort 守卫拒榜
 ```
+
+> **cohort = `comparable_unit` 绑定点**:绑定即定义一张可比榜的成员集。`软饮`/`乳品` 绑在子树根(整棵子树共享一个绑定点);酒类绑在**叶级**——各酒种容量单价(per100ml)不互比(啤酒 vs 威士忌不可同榜),故每酒种叶各自绑、各自出 cohort 榜,而酒类**父**节点保持 `null`、不出混榜。per100ml 是良定义的容量单价单位(任何液体成立),但**榜是否有意义取决于 cohort 同质性**——只在同一绑定点 cohort 内(啤酒比啤酒、牛奶比牛奶)才是有效购买比价。
+>
+> `软饮` 是一个**刻意宽的便利 cohort**:其内部跨碳酸/果汁植物饮/咖啡茶饮/饮用水,矿泉水(¥0.5/100ml)与果汁咖啡(¥4+/100ml)不在一个量级仍同榜——本期把 `乳品` 拆出独立 cohort(牛奶 vs 矿泉水 vs 鲜榨汁不可比),但软饮内部不再细拆,是「v1 先按绑定点开榜、细化留后续」的权衡。
 
 > 范围提醒:本次 HAR 全是「酒水饮料」部门、~66% 是酒类,**软饮样本少**。软饮各叶细分与可比单位校准需补一份**软饮为主的 HAR**(§八)。
 
 ## 五、打标签管线(守「AI 理解不判断」红线)
 
 ```
-标题 → tier1 关键词规则(确定性,**只产叶**):可乐/汽水→碳酸叶;无糖→属性无糖;品牌词→brand;苏打/气泡水→饮用水叶+属性气泡(气泡·电解质子分待细化,见 §四/§八)
+标题 → tier1 关键词规则(确定性,**只产叶**):可乐/汽水→碳酸叶;牛奶/酸奶/乳酸菌→乳品叶;葡萄酒/茅台/啤酒/威士忌/干邑/清酒→各酒种叶(`spirits`≠`whisky` 分两叶各产各叶);椰子水/燕麦奶/豆浆/果汁/电解质水等漏判软饮→软饮叶;无糖→属性无糖;品牌词→brand;苏打/气泡水→饮用水叶+属性气泡(气泡·电解质子分待细化,见 §四/§八)。**裸单字/泛描述词(度/啤/浓香/酱香/山楂/香槟/BIN/奶)禁止单独定叶**(防 `零度可乐` 落白酒、`啤梨汁` 落啤酒),须与型号/品牌词共现;软饮叶关键词命中时**优先于**酒类/乳品(防跨 cohort 误归);稀奶油等非饮品(有 per100ml 但非饮品)判不可比、不归任何饮品叶
      → store_category_map:山姆 categoryId(数值路径)→ 我们的 tag(高置信)
      → 仲裁(品类 kind),确定性优先级,对 `tier1 ∈ {未命中, 命中叶, 多叶tie}` × `store-map ∈ {未命中, 命中叶, 命中粗节点}` 全覆盖(tier1 只产叶,无「命中粗节点」态;tier1 多叶等优先级不可判 = `多叶tie`,视作「tier1 无确定输出」可落 ③ 回退):
         ① **两方都命中、粒度冲突**(粗细不同)→ 取更深(更细)叶(一般判据「取更深叶」双向适用,如 `tier1 细叶` > `store-map 粗节点`);
@@ -118,8 +126,8 @@ category_closure          品类 is-a 闭包(tag 维度,非 product 维度——
 ## 七、分期
 
 - **v1(随 `add-database` / Phase 3)**:tag 字典(kind + is-a + comparable_unit)、product_tag、store_category_map、category_closure;自动打标签 = tier1 规则 + 山姆 map(LLM 候选稍后)。
-  - **v1 排名只支持 `per_100ml` 节点**(软饮全线):`comparable_unit` 字段虽落库,但 core 本期只算 per100ml(对齐 `unit-price-calc` 主规范「只产 per100ml」);非 per100ml 节点(酒类/root/未来纸品)`rankable=false`、不出榜。`per_100g`/`per_100sheet` 为 **v2 占位**,本期重量/纸品商品一律走 `unit-price-calc` 不可计算终态。
-  - **`rankable` 已接入 `/rankings`(节点作用域榜)**:`GET /rankings?category=<节点 slug>`(缺省 `beverage` root)按 `category_closure` 闭包取该节点子树成员,入榜判据收敛为**合取**——① 闭包命中目标节点 ∧ ② `product.rankable=true`(资格门:已分类叶 ∧ 该叶解析出非空可比单位)∧ ③ 数据门(单价列非空,**列由可排名成员所在轴决定**;v1 唯一可排名轴是 per_100ml,故对任一节点含 root 均为 `per100ml IS NOT NULL`)。两门各司其职、缺一不可:`rankable` 答「该不该上可比轴」、数据门答「是否真有该数」。`rankable=false` 行(酒类叶 `comparable_unit=null`、待人工/待细化软饮)**一律不入任何节点榜**——这同时修正了「按容量轴排序酒类」的语义错误。配套 `GET /categories` 输出 category is-a 树,每节点带继承解析的 `comparableUnit`、节点自身轴标记 `rankable` 与闭包后代可排名数 `rankableCount`(后者与节点榜基数逐字一致、与 `rankable` 正交:root `rankable=false` 但 `rankableCount>0`=默认榜基数)。
+  - **v1 排名只支持 `per_100ml` 节点**(软饮全线 + 乳品全线 + 各酒种叶):`comparable_unit` 字段落库,core 本期只算 per100ml(对齐 `unit-price-calc` 主规范「只产 per100ml」);解析单位为 null 的节点(root `饮料`、`酒类` 父、未来纸品)`rankable=false`、不出榜。`per_100g`/`per_100sheet` 为 **v2 占位**,本期重量/纸品商品一律走 `unit-price-calc` 不可计算终态。
+  - **`rankable` 已接入 `/rankings`(节点作用域榜 + cohort 守卫)**:`GET /rankings?category=<节点 slug>`(**缺省 `soft-drink`**)按 `category_closure` 闭包取该节点子树成员。入榜判据为**合取**——⓪ 目标节点经静态解析得**非空 `comparable_unit`**(**cohort 守卫**:跨多个可比 cohort 的节点 root `饮料`/`酒类` 父解析 `null` → 整请求 `400`,杜绝「水 + 酒」「啤酒 + 威士忌」混榜)∧ ① 闭包命中目标节点 ∧ ② `product.rankable=true`(资格门:已分类叶 ∧ 该叶解析出非空可比单位)∧ ③ 数据门(单价列非空,**列由可排名成员所在轴决定**;v1 唯一可排名轴是 per_100ml,故对任一可开榜节点均为 `per100ml IS NOT NULL`)。`rankable=false` 行(待人工/待细化、非饮品如稀奶油)**一律不入任何节点榜**;而「不同酒种混排」「软饮 + 酒类混排」由 **cohort 守卫**(拒跨 cohort 父节点开榜)消除,**而非**靠把酒类标 `rankable=false`——本期酒类各叶**可排名**、各有自己的 per100ml cohort 榜。配套 `GET /categories` 输出 category is-a 树,每节点带继承解析的 `comparableUnit`、节点自身轴标记 `rankable` 与闭包后代可排名数 `rankableCount`。`rankable` 现**恰等于「该节点是单一 cohort、可点进榜」**(软饮/软饮叶/乳品/乳品叶/各酒种叶 `true`;root/酒类父 `false`)→ 消费契约**用 `rankable` 判榜入口**;`rankableCount` 对可点进节点 = 其 cohort 榜基数,对 `rankable=false` 节点(root/酒类父)为分支信息性计数(酒类父 `>0`)、不对应任何榜。
 - **v2**:LLM 候选打标签 + 白名单 guard;**eval 新增「品类标签准确率」维度**(见下);策展视图(无糖饮料等保存查询);跨店同款匹配;酒类/纸品等可比单位与计算扩展(届时 core 增 per_100g/per_100sheet 计算 + 解除 spec-parsing `category` 恒 beverage 约束)。
 
 ### eval「品类标签准确率」(是 eval-harness 的**新增需求**,非复用)
@@ -136,7 +144,7 @@ category_closure          品类 is-a 闭包(tag 维度,非 product 维度——
 ## 八、未决问题
 
 - **闭包**:查询期递归 vs 物化 `category_closure`(tag 维小表;规模到一定量再物化 product 命中)。
-- **酒类可比单位**:每100ml? +度数 attribute? 标准杯/单独榜——待软饮 HAR + 酒类样本到位定。
+- ~~**酒类可比单位**:每100ml? +度数 attribute? 标准杯/单独榜~~ → **已定**:各酒种叶各自绑 `per_100ml`、各出一张容量单价 cohort 榜(`spirits`≠`whisky` 分两叶各一榜);酒类**父**/root 解析单位 `null`、由 rankings cohort 守卫拒榜不出混榜。诚实标注:啤酒/葡萄酒/清酒果酒按容量消费、ABV 窄,per100ml 榜最干净;白酒/洋酒/威士忌价值由**度数 + 品牌**主导,其 per100ml 榜是「按容量单价」(受品牌档次影响、非「按酒精量」value)——更公平的「按标准杯/纯酒精」**度数 value 榜需 `度数` attribute,留 v2**。
 - **组合装/礼包**(非饮料,如洗发水+护发素套装):单归属 is-a 无法表达多归属/拆解,待 CategoryPlugin 扩展期(`architecture.md` Phase 4 复杂品类扩展)定;本期穿刺线=饮料,不触发。
 - **attribute 轻 is-a**(无糖 ⊂ 控糖?):首版扁平,按需再加。
 - **软饮样本失衡**:本期语料酒类为主,软饮细分与单位校准依赖补抓软饮 HAR。
@@ -149,5 +157,5 @@ category_closure          品类 is-a 闭包(tag 维度,非 product 维度——
 | `comparison_group` 表(物化字符串分组) | category 闭包 ∧ attribute **动态查询** | **取代**:对比组不物化,改查询(`comparison_group` 表废弃) |
 | `comparable` / `excludedReason`(商品是否可比) | 不覆盖——仍由 core `comparability` 产出 | **并存正交**:本设计管「比哪组/按什么单位」,comparability 管「该商品能不能参与」(组合/赠品/规格缺失) |
 | `unit-price-calc` 本期**只产 per100ml**、不引入 comparable/comparisonGroup | `comparable_unit` 多值为 v2 | **衔接**:v1 仅 per100ml 节点可排名(对齐主规范);非 per100ml 字段只存不算,v2 再补计算 |
-| 节点榜入榜判据(P3 前两套并存:扁平榜「仅 `per100ml IS NOT NULL`」vs taxonomy 资格门) | `/rankings` 节点榜判据 = 闭包成员 ∧ `rankable=true` ∧ 数据门(列随节点轴,v1 一律 per100ml) | **收敛**:P3 起两套判据合一为**合取**;`rankable` 接入 `/rankings` 作资格门,数据门列由可排名成员轴决定;`/categories` 暴露品类树供浏览,`rankableCount` 与节点榜基数一致 |
+| 节点榜入榜判据(P3 前两套并存:扁平榜「仅 `per100ml IS NOT NULL`」vs taxonomy 资格门) | `/rankings` 节点榜判据 = **cohort 守卫(目标节点解析单位非空)** ∧ 闭包成员 ∧ `rankable=true` ∧ 数据门(列随节点轴,v1 一律 per100ml);缺省节点 = `soft-drink` | **收敛**:P3 起两套判据合一为**合取**,P3.5 起前置 **cohort 守卫**(跨 cohort 父节点 root/酒类父解析 `null` → `400`、不出混榜),默认节点由 root `beverage` 改 `soft-drink`;`/categories` 暴露品类树供浏览,消费契约用 `rankable` 判榜入口,`rankableCount` 对可点进节点与其 cohort 榜基数一致 |
 | `spec-parsing` `category` 恒 `beverage` | 打标签管线产真实品类 | **衔接**:v2 解除恒常量约束,改由管线/map 赋值 |
