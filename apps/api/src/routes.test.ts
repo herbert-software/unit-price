@@ -552,7 +552,8 @@ describe('GET /rankings — limit clamp', () => {
     await getRankings(app);
     expect(seen!.limit).toBe(50);
     expect(seen!.offset).toBe(0);
-    expect(seen!.category).toBe('beverage');
+    // P3.5: default category is `soft-drink` (the 软饮 cohort), not root `beverage`.
+    expect(seen!.category).toBe('soft-drink');
   });
 });
 
@@ -611,12 +612,24 @@ describe('GET /rankings — unknown/non-category/wrong-case/empty category -> 40
     expect(listRankings).not.toHaveBeenCalled();
   });
 
+  // P3.5 cohort guard: a node that statically resolves a non-null comparable_unit
+  // (soft-drink / its leaves / dairy / dairy leaves / each 酒种 leaf) is admitted.
   it.each([
-    ['root', 'beverage'],
     ['soft-drink parent', 'soft-drink'],
     ['carbonated leaf', 'carbonated'],
-    ['alcohol (legal but rankable=false subtree)', 'alcohol'],
-  ])('?category=%s (exact seed slug) is admitted -> 200', async (_name, slug) => {
+    ['coffee-tea leaf', 'coffee-tea'],
+    ['drinking-water leaf', 'drinking-water'],
+    ['dairy parent', 'dairy'],
+    ['milk leaf', 'milk'],
+    ['yogurt leaf', 'yogurt'],
+    ['lactic-drink leaf', 'lactic-drink'],
+    ['beer leaf', 'beer'],
+    ['wine leaf', 'wine'],
+    ['spirits leaf', 'spirits'],
+    ['whisky leaf', 'whisky'],
+    ['baijiu leaf', 'baijiu'],
+    ['sake-fruit-wine leaf', 'sake-fruit-wine'],
+  ])('?category=%s (cohort node, comparable_unit non-null) is admitted -> 200', async (_name, slug) => {
     let seen: ListRankingsInput | null = null;
     const { app } = rankingsApp(SNAPSHOT, { onCall: (i) => (seen = i) });
     const { res } = await getRankings(app, `?category=${slug}`);
@@ -624,18 +637,41 @@ describe('GET /rankings — unknown/non-category/wrong-case/empty category -> 40
     // The validated slug is forwarded to listRankings verbatim.
     expect(seen!.category).toBe(slug);
   });
+
+  // P3.5 cohort guard: a cross-cohort node (root `beverage`, `alcohol` parent)
+  // statically resolves null → 400 (it spans multiple per100ml cohorts; the
+  // board would mix 矿泉水+葡萄酒 / 啤酒+威士忌). Replaces the P3 `→ 200` rows.
+  // The guard fires BEFORE the repo is queried.
+  it.each([
+    ['root', 'beverage'],
+    ['alcohol parent', 'alcohol'],
+  ])('?category=%s (cross-cohort node, comparable_unit null) -> 400 invalid-request', async (_name, slug) => {
+    const { app, listRankings } = rankingsApp(SNAPSHOT);
+    const { res, json } = await getRankings(app, `?category=${slug}`);
+    expect(res.status).toBe(400);
+    expect(json.error).toBe('invalid-request');
+    expect(listRankings).not.toHaveBeenCalled();
+  });
 });
 
-describe('GET /rankings — node scope: default = beverage = root closure', () => {
-  it('no params ≡ ?category=beverage: same forwarded ListRankingsInput', async () => {
+describe('GET /rankings — node scope: default = soft-drink cohort (P3.5)', () => {
+  it('no params ≡ ?category=soft-drink: same forwarded ListRankingsInput', async () => {
     let noParam: ListRankingsInput | null = null;
     const a = rankingsApp(SNAPSHOT, { onCall: (i) => (noParam = i) });
     await getRankings(a.app);
     let explicit: ListRankingsInput | null = null;
     const b = rankingsApp(SNAPSHOT, { onCall: (i) => (explicit = i) });
-    await getRankings(b.app, '?category=beverage');
+    await getRankings(b.app, '?category=soft-drink');
     expect(noParam!).toEqual(explicit!);
-    expect(noParam!.category).toBe('beverage');
+    expect(noParam!.category).toBe('soft-drink');
+  });
+
+  it('explicit ?category=beverage (root, cross-cohort) -> 400 (guard fires before repo)', async () => {
+    const { app, listRankings } = rankingsApp(SNAPSHOT);
+    const { res, json } = await getRankings(app, '?category=beverage');
+    expect(res.status).toBe(400);
+    expect(json.error).toBe('invalid-request');
+    expect(listRankings).not.toHaveBeenCalled();
   });
 });
 
@@ -675,22 +711,27 @@ function nodeRankingsApp(byNode: Record<string, RankingRow[]>) {
 }
 
 describe('GET /rankings — closure node scoping (route forwards slug, projects rows)', () => {
-  // A small dirty-ish snapshot keyed by node. The root snapshot is the union of
-  // the two soft-drink leaves (carbonated + drinking-water) — i.e. the parent
-  // closure includes the child leaves. alcohol returns [] (rankable=false subtree).
+  // A small dirty-ish snapshot keyed by node. The soft-drink snapshot is the union
+  // of its two leaves (carbonated + drinking-water) — i.e. the parent closure
+  // includes the child leaves. Each 酒种 leaf is its own cohort (beer here has its
+  // own members); the `alcohol` parent is cohort-guarded out (400), so the route
+  // never even queries the repo for it (no byNode entry needed).
   const carbonated = [
     row({ id: 'c-1', per100ml: 0.5, storeSku: 'sku-carb-1' }),
     row({ id: 'c-2', per100ml: 3.2, storeSku: 'sku-carb-2' }),
   ];
   const water = [row({ id: 'w-1', per100ml: 1.1, storeSku: 'sku-water-1' })];
-  // soft-drink parent / root closure = both leaves, merged ascending by per100ml.
+  const beerRows = [
+    row({ id: 'b-1', per100ml: 1.8, storeSku: 'sku-beer-1' }),
+    row({ id: 'b-2', per100ml: 4.5, storeSku: 'sku-beer-2' }),
+  ];
+  // soft-drink parent closure = both leaves, merged ascending by per100ml.
   const softDrink = [carbonated[0]!, water[0]!, carbonated[1]!];
   const byNode: Record<string, RankingRow[]> = {
-    beverage: softDrink,
     'soft-drink': softDrink,
     carbonated,
     'drinking-water': water,
-    alcohol: [],
+    beer: beerRows,
   };
 
   it('leaf ?category=carbonated returns only the carbonated members', async () => {
@@ -715,7 +756,7 @@ describe('GET /rankings — closure node scoping (route forwards slug, projects 
     expect(json.map((r: any) => r.rank)).toEqual([1, 2, 3]);
   });
 
-  it('default (no params) = root beverage closure = soft-drink union', async () => {
+  it('default (no params) = soft-drink cohort (not the cross-cohort root)', async () => {
     const { app } = nodeRankingsApp(byNode);
     const { res, json } = await getRankings(app);
     expect(res.status).toBe(200);
@@ -726,23 +767,63 @@ describe('GET /rankings — closure node scoping (route forwards slug, projects 
     ]);
   });
 
-  it('alcohol node (rankable=false subtree) -> 200 + [] (not 400/404)', async () => {
+  it('?category=beer returns only the beer cohort; other 酒种/软饮 never mix', async () => {
     const { app } = nodeRankingsApp(byNode);
-    const { res, json } = await getRankings(app, '?category=alcohol');
+    const { res, json } = await getRankings(app, '?category=beer');
     expect(res.status).toBe(200);
-    expect(json).toEqual([]);
+    expect(json.map((r: any) => r.storeSku)).toEqual(['sku-beer-1', 'sku-beer-2']);
+    // No soft-drink member leaks into the beer cohort board.
+    expect(json.find((r: any) => r.storeSku === 'sku-carb-1')).toBeUndefined();
+  });
+
+  it('alcohol parent (cross-cohort) -> 400, repo never queried (cohort guard)', async () => {
+    const { app, listRankings } = nodeRankingsApp(byNode);
+    const { res, json } = await getRankings(app, '?category=alcohol');
+    expect(res.status).toBe(400);
+    expect(json.error).toBe('invalid-request');
+    expect(listRankings).not.toHaveBeenCalled();
   });
 
   it('legal-but-unseeded slug (no tag row) -> 200 + [] (not 400)', async () => {
-    // `juice-plant` is a seed slug but absent from byNode → repo returns []
-    // (the migrate-before-seed window), mirroring a real repo's behavior.
+    // `juice-plant` is a seed slug (static unit per_100ml) but absent from byNode
+    // → repo returns [] (the migrate-before-seed window), mirroring a real repo.
     const { app, listRankings } = nodeRankingsApp(byNode);
     const { res, json } = await getRankings(app, '?category=juice-plant');
     expect(res.status).toBe(200);
     expect(json).toEqual([]);
-    // It passed the 400 gate (a legal slug) and reached the repo — NOT a typo 400.
+    // It cleared the slug enum AND the static cohort guard (a legal cohort slug)
+    // and reached the repo — NOT a typo 400, NOT a cohort 400.
     expect(listRankings).toHaveBeenCalled();
     expect(listRankings.mock.calls[0]![0].category).toBe('juice-plant');
+  });
+});
+
+// ── GET /rankings — cohort guard runs on the STATIC tree, not DB seed state ──
+// The decisive P3.5 contract: a legal cohort leaf (`beer`) that statically
+// resolves `per_100ml` clears the guard even when the DB has NO tag rows seeded
+// (the migrate-before-seed window → repo returns []), so it is 200 [], never 400.
+// A cross-cohort parent (`alcohol`) statically resolves null → 400 regardless of
+// seed state. This proves the guard uses the compile-time `CATEGORY_NODES`, not a
+// runtime `tag`-table round-trip (which would wrongly 400 the unseeded `beer`).
+describe('GET /rankings — cohort guard is static (unseeded-window)', () => {
+  it('?category=beer on an UNSEEDED (empty tag) DB -> 200 + [] (static guard passes)', async () => {
+    // The repo returns [] for every slug (no tag rows seeded yet).
+    const { app, listRankings } = nodeRankingsApp({});
+    const { res, json } = await getRankings(app, '?category=beer');
+    expect(res.status).toBe(200);
+    expect(json).toEqual([]);
+    // The guard did NOT consult the DB to decide — it cleared `beer` statically
+    // (per_100ml) and let the request reach the repo, which returned [].
+    expect(listRankings).toHaveBeenCalled();
+    expect(listRankings.mock.calls[0]![0].category).toBe('beer');
+  });
+
+  it('?category=alcohol on an UNSEEDED DB -> 400 (static null, repo never queried)', async () => {
+    const { app, listRankings } = nodeRankingsApp({});
+    const { res, json } = await getRankings(app, '?category=alcohol');
+    expect(res.status).toBe(400);
+    expect(json.error).toBe('invalid-request');
+    expect(listRankings).not.toHaveBeenCalled();
   });
 });
 
@@ -780,8 +861,11 @@ describe('GET /rankings — same per100ml stable pagination (one snapshot)', () 
 
 describe('GET /rankings — read failure -> 500 persistence-error', () => {
   it('listRankings throwing maps to 500 persistence-error (no recompute, no retry)', async () => {
+    // Use a legal cohort slug (soft-drink) so the request clears the cohort guard
+    // and actually reaches the throwing repo. A cross-cohort `beverage` would 400
+    // at the guard BEFORE the repo throws — the wrong code path for this test.
     const { app } = rankingsApp(SNAPSHOT, { throws: true });
-    const { res, json } = await getRankings(app, '?category=beverage');
+    const { res, json } = await getRankings(app, '?category=soft-drink');
     expect(res.status).toBe(500);
     expect(json.error).toBe('persistence-error');
   });
@@ -869,21 +953,28 @@ function node(over: Partial<CategoryTreeNode> & Pick<CategoryTreeNode, 'slug' | 
 }
 
 /**
- * A tree fixture mirroring the seed: root `beverage` (rankable=false but
- * rankableCount>0 = default board basis), the `soft-drink` parent and its leaves
- * (all per_100ml / rankable=true), and the alcohol subtree (comparableUnit=null /
- * rankable=false / rankableCount=0). Counts are chosen so the parent equals the
- * union of its leaves and root equals the soft-drink total.
+ * A tree fixture mirroring the P3.5 seed: root `beverage` (rankable=false,
+ * comparableUnit=null — NOT the default board, which is now `soft-drink`), the
+ * `soft-drink` parent + leaves (all per_100ml / rankable=true), the `dairy` parent
+ * + leaves (per_100ml / rankable=true), and the alcohol subtree — where the
+ * `alcohol` PARENT is comparableUnit=null / rankable=false (cross-cohort,
+ * cohort-guarded out of /rankings) but its rankableCount > 0 (its 酒种 leaf
+ * descendants ARE rankable), and each 酒种 LEAF is per_100ml / rankable=true (its
+ * own cohort). Counts: each parent equals the union of its rankable descendants.
  */
 const TREE: CategoryTreeNode[] = [
-  node({ slug: 'beverage', name: '饮料', parentSlug: null, comparableUnit: null, rankable: false, rankableCount: 7 }),
+  node({ slug: 'beverage', name: '饮料', parentSlug: null, comparableUnit: null, rankable: false, rankableCount: 13 }),
   node({ slug: 'soft-drink', name: '软饮', parentSlug: 'beverage', comparableUnit: 'per_100ml', rankable: true, rankableCount: 7 }),
   node({ slug: 'carbonated', name: '碳酸饮料', parentSlug: 'soft-drink', comparableUnit: 'per_100ml', rankable: true, rankableCount: 4 }),
   node({ slug: 'drinking-water', name: '饮用水', parentSlug: 'soft-drink', comparableUnit: 'per_100ml', rankable: true, rankableCount: 3 }),
   node({ slug: 'juice-plant', name: '果汁·植物饮', parentSlug: 'soft-drink', comparableUnit: 'per_100ml', rankable: true, rankableCount: 0 }),
-  node({ slug: 'alcohol', name: '酒类', parentSlug: 'beverage', comparableUnit: null, rankable: false, rankableCount: 0 }),
-  node({ slug: 'wine', name: '葡萄酒', parentSlug: 'alcohol', comparableUnit: null, rankable: false, rankableCount: 0 }),
-  node({ slug: 'baijiu', name: '白酒', parentSlug: 'alcohol', comparableUnit: null, rankable: false, rankableCount: 0 }),
+  node({ slug: 'dairy', name: '乳品', parentSlug: 'beverage', comparableUnit: 'per_100ml', rankable: true, rankableCount: 2 }),
+  node({ slug: 'milk', name: '牛奶', parentSlug: 'dairy', comparableUnit: 'per_100ml', rankable: true, rankableCount: 2 }),
+  node({ slug: 'yogurt', name: '酸奶', parentSlug: 'dairy', comparableUnit: 'per_100ml', rankable: true, rankableCount: 0 }),
+  node({ slug: 'lactic-drink', name: '乳酸菌饮料', parentSlug: 'dairy', comparableUnit: 'per_100ml', rankable: true, rankableCount: 0 }),
+  node({ slug: 'alcohol', name: '酒类', parentSlug: 'beverage', comparableUnit: null, rankable: false, rankableCount: 4 }),
+  node({ slug: 'wine', name: '葡萄酒', parentSlug: 'alcohol', comparableUnit: 'per_100ml', rankable: true, rankableCount: 3 }),
+  node({ slug: 'baijiu', name: '白酒', parentSlug: 'alcohol', comparableUnit: 'per_100ml', rankable: true, rankableCount: 1 }),
 ];
 
 /** App whose Repository serves `tree` from listCategoryTree (read-only). */
@@ -952,58 +1043,87 @@ describe('GET /categories — full category is-a tree, only the category axis', 
   });
 });
 
-describe('GET /categories — comparableUnit / rankable per node', () => {
-  it('soft-drink parent + leaves: per_100ml + rankable=true; alcohol+root: null + rankable=false', async () => {
+describe('GET /categories — comparableUnit / rankable per node (P3.5 收敛)', () => {
+  it('soft-drink/dairy/酒种叶: per_100ml + rankable=true; alcohol parent+root: null + rankable=false', async () => {
     const { app } = categoriesApp(TREE);
     const { json } = await getCategories(app);
     const bySlug: Record<string, any> = Object.fromEntries(json.nodes.map((n: any) => [n.slug, n]));
-    // soft-drink parent (directly bound) and soft-drink leaves (inherited).
-    for (const slug of ['soft-drink', 'carbonated', 'drinking-water', 'juice-plant']) {
+    // Soft-drink line, dairy line, and each 酒种 leaf are all single rankable
+    // cohorts (per_100ml / rankable=true → 可点进).
+    for (const slug of [
+      'soft-drink', 'carbonated', 'drinking-water', 'juice-plant',
+      'dairy', 'milk', 'yogurt', 'lactic-drink',
+      'wine', 'baijiu',
+    ]) {
       expect(bySlug[slug].comparableUnit).toBe('per_100ml');
       expect(bySlug[slug].rankable).toBe(true);
     }
-    // alcohol parent + alcohol leaves + root: comparableUnit null, rankable false.
-    for (const slug of ['alcohol', 'wine', 'baijiu', 'beverage']) {
+    // ONLY the cross-cohort ancestors (alcohol parent, root) are null / rankable
+    // false (不可点进, /rankings cohort-guards them to 400).
+    for (const slug of ['alcohol', 'beverage']) {
       expect(bySlug[slug].comparableUnit).toBeNull();
       expect(bySlug[slug].rankable).toBe(false);
     }
   });
 });
 
-describe('GET /categories — rankableCount orthogonal to rankable', () => {
-  it('root beverage rankableCount > 0 and equals default /rankings basis; alcohol = 0', async () => {
+describe('GET /categories — rankableCount orthogonal to rankable (P3.5)', () => {
+  it('root + alcohol parent: rankable=false yet rankableCount>0 (informational branch count)', async () => {
     const { app } = categoriesApp(TREE);
     const { json } = await getCategories(app);
     const bySlug: Record<string, any> = Object.fromEntries(json.nodes.map((n: any) => [n.slug, n]));
-    // Root is rankable=false yet its closure has rankable members → count > 0.
+    // Root is rankable=false (not 可点进) yet its closure has rankable members →
+    // count > 0 (a branch信息 count, NOT a clickable board — /rankings 400s it).
     expect(bySlug.beverage.rankable).toBe(false);
     expect(bySlug.beverage.rankableCount).toBeGreaterThan(0);
+    // P3.5 KEY FLIP: the alcohol PARENT is rankable=false but rankableCount>0 (its
+    // 酒种 leaf descendants are rankable). A client must NOT read this as 可点进.
+    expect(bySlug.alcohol.rankable).toBe(false);
+    expect(bySlug.alcohol.rankableCount).toBeGreaterThan(0);
     // soft-drink parent count = union of its leaves (4 + 3 + 0).
     expect(bySlug['soft-drink'].rankableCount).toBe(7);
-    // alcohol subtree has no rankable members → count 0 (despite being a node).
-    expect(bySlug.alcohol.rankableCount).toBe(0);
-    expect(bySlug.wine.rankableCount).toBe(0);
+    // 酒种 leaves ARE rankable cohorts with their own counts (no longer 0).
+    expect(bySlug.wine.rankable).toBe(true);
+    expect(bySlug.wine.rankableCount).toBe(3);
+    expect(bySlug.baijiu.rankableCount).toBe(1);
   });
 
-  it('an empty leaf (juice-plant) stays in the tree with rankableCount=0', async () => {
+  it('an empty rankable leaf (juice-plant / yogurt) stays in the tree with rankableCount=0', async () => {
     const { app } = categoriesApp(TREE);
     const { json } = await getCategories(app);
-    const jp = json.nodes.find((n: any) => n.slug === 'juice-plant');
-    expect(jp).toBeDefined();
-    expect(jp.rankableCount).toBe(0);
+    const bySlug: Record<string, any> = Object.fromEntries(json.nodes.map((n: any) => [n.slug, n]));
+    // 可点进 but empty cohort: rankable=true ∧ rankableCount=0 (空 cohort, 仍列出).
+    for (const slug of ['juice-plant', 'yogurt']) {
+      expect(bySlug[slug]).toBeDefined();
+      expect(bySlug[slug].rankable).toBe(true);
+      expect(bySlug[slug].rankableCount).toBe(0);
+    }
+  });
+
+  // P3.5 consumption contract: 可点进 is decided by node.rankable, NOT by
+  // rankableCount>0. The alcohol parent is the canonical counter-example.
+  it('consumption contract: alcohol parent rankableCount>0 but rankable=false → NOT 可点进', async () => {
+    const { app } = categoriesApp(TREE);
+    const { json } = await getCategories(app);
+    const alcohol = json.nodes.find((n: any) => n.slug === 'alcohol');
+    // A client keying off rankableCount>0 would wrongly treat it as clickable;
+    // the contract says key off rankable (=false → 不可点进, matches /rankings 400).
+    expect(alcohol.rankableCount).toBeGreaterThan(0);
+    expect(alcohol.rankable).toBe(false);
   });
 });
 
-describe('GET /categories — rankableCount matches the node board basis', () => {
-  it('root rankableCount equals the default /rankings (no params) basis (same snapshot)', async () => {
-    // One repo serves BOTH endpoints off a shared snapshot: a 7-row root board
-    // and a tree whose root rankableCount=7. The route must report the same N on
-    // both surfaces.
-    const rootBoard: RankingRow[] = Array.from({ length: 7 }, (_, i) =>
-      row({ id: `r-${i}`, per100ml: i + 1, storeSku: `sku-r-${i}` }),
+describe('GET /categories — rankableCount matches the cohort board basis (P3.5)', () => {
+  it('soft-drink (可点进) rankableCount equals the default /rankings (no params) basis', async () => {
+    // One repo serves BOTH surfaces off a shared snapshot keyed by node. The
+    // default /rankings (no params) is the `soft-drink` cohort (P3.5), so the
+    // soft-drink board basis must equal the tree's soft-drink rankableCount (7).
+    const softBoard: RankingRow[] = Array.from({ length: 7 }, (_, i) =>
+      row({ id: `s-${i}`, per100ml: i + 1, storeSku: `sku-s-${i}` }),
     );
+    const byNode: Record<string, RankingRow[]> = { 'soft-drink': softBoard };
     const listRankings = vi.fn(async (input: ListRankingsInput) =>
-      rootBoard.slice(input.offset, input.offset + input.limit),
+      (byNode[input.category] ?? []).slice(input.offset, input.offset + input.limit),
     );
     const listCategoryTree = vi.fn(async () => TREE);
     const repo = {
@@ -1029,13 +1149,20 @@ describe('GET /categories — rankableCount matches the node board basis', () =>
     });
 
     const cats = await getCategories(app);
-    const rootCount = cats.json.nodes.find((n: any) => n.slug === 'beverage').rankableCount;
+    const softCount = cats.json.nodes.find((n: any) => n.slug === 'soft-drink').rankableCount;
+    expect(softCount).toBe(7);
+    // Default board (no params) ≡ soft-drink cohort → same basis N.
     const board = await getRankings(app, '?limit=200');
-    expect(board.json).toHaveLength(rootCount);
+    expect(board.json).toHaveLength(softCount);
   });
 
-  it('alcohol rankableCount=0 and its node board is empty (same data)', async () => {
-    const byNode: Record<string, RankingRow[]> = { alcohol: [] };
+  it('a 可点进 酒种 leaf (wine) rankableCount equals its cohort board basis', async () => {
+    // For a rankable=true cohort node, rankableCount MUST equal its
+    // /rankings?category=<node> basis. wine: tree count 3, board 3 rows.
+    const wineBoard: RankingRow[] = Array.from({ length: 3 }, (_, i) =>
+      row({ id: `wine-${i}`, per100ml: 10 + i, storeSku: `sku-wine-${i}` }),
+    );
+    const byNode: Record<string, RankingRow[]> = { wine: wineBoard };
     const listRankings = vi.fn(async (input: ListRankingsInput) =>
       (byNode[input.category] ?? []).slice(input.offset, input.offset + input.limit),
     );
@@ -1062,10 +1189,53 @@ describe('GET /categories — rankableCount matches the node board basis', () =>
       makeRepo: () => repo,
     });
     const cats = await getCategories(app);
+    const wineCount = cats.json.nodes.find((n: any) => n.slug === 'wine').rankableCount;
+    expect(wineCount).toBe(3);
+    // wine is a rankable cohort: the guard passes and the board basis matches.
+    const wineBoardRes = await getRankings(app, '?category=wine');
+    expect(wineBoardRes.json).toHaveLength(wineCount);
+  });
+
+  it('alcohol parent: rankableCount>0 (not 可点进) but its /rankings board is 400 (cohort guard)', async () => {
+    // P3.5: the alcohol PARENT has rankable descendants (rankableCount>0) but is
+    // NOT a single cohort → /rankings?category=alcohol is 400 (no board), so the
+    // "count == board basis" consistency does NOT apply (it only binds rankable
+    // nodes). This asserts the divergence: count>0 on the tree, 400 on /rankings.
+    const listRankings = vi.fn(async (input: ListRankingsInput): Promise<RankingRow[]> => {
+      // Defensive: the route must NOT reach here for alcohol (guard fires first).
+      void input;
+      return [];
+    });
+    const listCategoryTree = vi.fn(async () => TREE);
+    const repo = {
+      async upsertRaw() {
+        throw new Error('read-only');
+      },
+      async saveParsed() {
+        throw new Error('read-only');
+      },
+      async getProduct() {
+        return null;
+      },
+      async saveCorrection() {
+        throw new Error('read-only');
+      },
+      listRankings,
+      listCategoryTree,
+    } as unknown as Repository;
+    const app = createApp({
+      makeLlm: () => throwingPort,
+      governance: createNoopGovernance(),
+      makeRepo: () => repo,
+    });
+    const cats = await getCategories(app);
     const alcoholCount = cats.json.nodes.find((n: any) => n.slug === 'alcohol').rankableCount;
-    expect(alcoholCount).toBe(0);
+    expect(alcoholCount).toBeGreaterThan(0);
     const board = await getRankings(app, '?category=alcohol');
-    expect(board.json).toEqual([]);
+    expect(board.res.status).toBe(400);
+    expect(board.json.error).toBe('invalid-request');
+    // The cohort guard fired before the repo board query.
+    expect(listRankings).not.toHaveBeenCalled();
   });
 });
 

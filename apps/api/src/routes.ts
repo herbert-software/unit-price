@@ -7,7 +7,13 @@
 //         contracted-form, and low-confidence results.
 import { Hono, type Context } from 'hono';
 import { z } from 'zod';
-import { ParsedSpecSchema, UnitPriceSchema, WarningsSchema, type RawProduct } from '@unit-price/core';
+import {
+  ParsedSpecSchema,
+  UnitPriceSchema,
+  WarningsSchema,
+  type ComparableUnit,
+  type RawProduct,
+} from '@unit-price/core';
 import { RankingsResponseSchema, CategoryTreeResponseSchema } from '@unit-price/api-client';
 import { CATEGORY_NODES, type Db, type Repository } from '@unit-price/db';
 import { orchestrate } from './orchestrate.js';
@@ -157,6 +163,42 @@ export type BatchIngestResponse = z.infer<typeof BatchIngestResponseSchema>;
 export const CATEGORY_SLUGS = CATEGORY_NODES.map((n) => n.slug) as [string, ...string[]];
 
 /**
+ * Static slug→node map over the COMPILE-TIME seed truth (`CATEGORY_NODES`), built
+ * once at module load. Same single-source paradigm as `CATEGORY_SLUGS` — apps/api
+ * never hand-writes a second tree and never round-trips the `tag` table.
+ */
+const CATEGORY_NODE_BY_SLUG = new Map(CATEGORY_NODES.map((n) => [n.slug, n]));
+
+/**
+ * Resolve a category slug's effective `comparable_unit` by is-a inheritance over
+ * the STATIC `CATEGORY_NODES` constant — the node's own value, else walk
+ * `parentSlug` up to the nearest non-null ancestor; null all the way to root → null.
+ * Pure synchronous, NO DB round-trip (mirrors `resolveComparableUnitInMemory`, but
+ * over the compile-time seed, not the `tag` table).
+ *
+ * This is the cohort guard's resolver: it MUST NOT use the repository's runtime
+ * `repo.resolveComparableUnit` (which reads the `tag` table). A legal-but-unseeded
+ * cohort slug (e.g. `beer` in the migrate-before-seed window) has no `tag` row, so
+ * a runtime resolve returns null → the guard would wrongly 400 it, breaking the
+ * "legal-but-unseeded slug → 200 []" contract. The static resolve is invariant to
+ * DB seed state: `beer` is ALWAYS `per_100ml` (its own binding), `alcohol`/`beverage`
+ * are ALWAYS null (cross-cohort ancestors), so the guard and the unseeded-window
+ * contract hold simultaneously. An unknown slug (already rejected by the
+ * `CATEGORY_SLUGS` enum gate before this is called) also resolves null.
+ */
+export function resolveComparableUnitStatic(slug: string): ComparableUnit | null {
+  let cursor = CATEGORY_NODE_BY_SLUG.get(slug);
+  let guard = 0;
+  while (cursor != null && guard < 64) {
+    if (cursor.comparableUnit != null) return cursor.comparableUnit;
+    if (cursor.parentSlug == null) return null;
+    cursor = CATEGORY_NODE_BY_SLUG.get(cursor.parentSlug);
+    guard += 1;
+  }
+  return null;
+}
+
+/**
  * GET /rankings query parameters. Query values arrive as strings. `limit` and
  * `offset` accept ONLY a decimal non-negative integer string (STRICT, symmetric):
  * a present value is gated by `^\d+$` BEFORE numeric conversion, so loose coercion
@@ -174,17 +216,19 @@ export const CATEGORY_SLUGS = CATEGORY_NODES.map((n) => n.slug) as [string, ...s
  * just like empty `limit`, not silently treated as 0). A valid in-range-but-past-
  * the-end offset is a route-level concern (→ 200 + []), not a parse failure.
  *
- * `category` (CASE-SENSITIVE), default `beverage` (the root node slug). Present:
- * MUST exactly match one seed kind=category node slug. The accepted set is
- * `CATEGORY_SLUGS`, derived AT COMPILE TIME from `packages/db`'s `CATEGORY_NODES`
- * (the seed truth) — apps/api does NOT hand-write a second slug list (would drift
- * from seed). Validation is a pure synchronous parse (NO runtime `tag`-table
- * lookup: that cannot tell a legal-but-unseeded slug apart from a typo). An
- * unknown / non-category / wrong-case / empty `?category=` slug → 400 invalid-
- * request. A slug that IS in the set but whose `tag` row is not seeded yet
- * (migrate-before-seed window) is NOT a parse failure here: it passes the gate
- * and the repository returns [] (→ 200), so a typo and an unseeded-but-legal slug
- * stay distinguishable. The validated slug drives the closure filter
+ * `category` (CASE-SENSITIVE), default `soft-drink` (the 软饮 cohort node — P3.5
+ * replaces the P3 root `beverage` default so the no-param board is the soft-drink
+ * cohort, not a cross-cohort root). Present: MUST exactly match one seed
+ * kind=category node slug. The accepted set is `CATEGORY_SLUGS`, derived AT COMPILE
+ * TIME from `packages/db`'s `CATEGORY_NODES` (the seed truth) — apps/api does NOT
+ * hand-write a second slug list (would drift from seed). Validation is a pure
+ * synchronous parse (NO runtime `tag`-table lookup: that cannot tell a legal-but-
+ * unseeded slug apart from a typo). An unknown / non-category / wrong-case / empty
+ * `?category=` slug → 400 invalid-request. A slug that IS in the set but whose `tag`
+ * row is not seeded yet (migrate-before-seed window) is NOT a parse failure here: it
+ * passes the gate, clears the cohort guard via the STATIC resolver (see the route
+ * handler), and the repository returns [] (→ 200), so a typo and an unseeded-but-
+ * legal slug stay distinguishable. The validated slug drives the closure filter
  * (`category_closure.ancestor_tag_id = <that node>` + `product.rankable=1` +
  * `per100ml IS NOT NULL`) inside listRankings.
  */
@@ -204,7 +248,7 @@ export const RankingsQuerySchema = z.object({
     .pipe(z.number().int().nonnegative())
     .optional()
     .transform((n) => n ?? 0),
-  category: z.enum(CATEGORY_SLUGS).default('beverage'),
+  category: z.enum(CATEGORY_SLUGS).default('soft-drink'),
 });
 
 export type RankingsQuery = z.infer<typeof RankingsQuerySchema>;
@@ -409,7 +453,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   app.get('/rankings', async (c) => {
     // ── Validate query params. Values arrive as strings; RankingsQuerySchema
     //    coerces/clamps limit, validates offset, and enforces category ∈ the seed
-    //    kind=category slug set (case-sensitive, default `beverage`/root). Any
+    //    kind=category slug set (case-sensitive, default `soft-drink`). Any
     //    failure → 400 invalid-request, same shape/code as the other endpoints.
     //    An out-of-range (but valid) offset is NOT a parse failure — it falls
     //    through to listRankings, which returns [] (→ 200). A legal-but-unseeded
@@ -426,6 +470,29 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
       );
     }
     const { limit, offset, category } = parsedQuery.data;
+
+    // ── Cohort guard (P3.5): the board is open ONLY for a node that resolves a
+    //    non-null comparable_unit (a single rankable cohort — soft-drink / its
+    //    leaves / dairy / dairy leaves / each 酒种 leaf). A cross-cohort node
+    //    (root `beverage`, the `alcohol` parent) resolves null → reject with
+    //    400 invalid-request so per100ml-incomparable boards (矿泉水+葡萄酒,
+    //    啤酒+威士忌) never form. The resolve is the STATIC `CATEGORY_NODES`
+    //    resolver — NOT the runtime `repo.resolveComparableUnit` — so a legal-
+    //    but-unseeded cohort slug (e.g. `beer` before its `tag` row is seeded)
+    //    clears the guard (its static unit is `per_100ml`) and falls through to
+    //    listRankings → [] (200), while `alcohol`/`beverage` are 400 regardless
+    //    of seed state. The guard runs BEFORE the repo, so it adds no D1 round-
+    //    trip and reuses the existing invalid-request shape/code (no new code).
+    if (resolveComparableUnitStatic(category) === null) {
+      return c.json(
+        {
+          error: 'invalid-request',
+          message:
+            'this node spans multiple comparable cohorts and cannot be ranked directly; choose a sub-category',
+        },
+        400,
+      );
+    }
 
     // ── Resolve the repository (shared helper; null/throw → 500 persistence-
     //    error). Read-only — no write path is reachable from here.

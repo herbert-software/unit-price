@@ -1,12 +1,13 @@
 // listCategoryTree: read-only category is-a tree + per-node rankableCount.
 // Pure SQLite/in-memory with the canonical taxonomy seeded. Covers: all
 // kind=category nodes returned (no attribute/brand/product_line axes), in-memory
-// inheritance resolution of comparableUnit (soft-drink line per_100ml,
-// root/alcohol null), node `rankable` = comparableUnit !== null, rankableCount
-// being closure-descendant rankable members (orthogonal to the node's own
-// rankable — root>0, alcohol=0), per-node rankableCount == the node board's
-// cardinality (含 root / 父 / 叶 / 酒类), a no-rankable-member node count=0, and
-// the un-seeded empty tree.
+// inheritance resolution of comparableUnit (soft-drink/dairy line + 酒种 leaves
+// per_100ml, root/酒类 parent null), node `rankable` = comparableUnit !== null,
+// rankableCount being closure-descendant rankable members (orthogonal to the
+// node's own rankable — P3.5: root>0 AND 酒类 parent>0), per can-point-in node
+// rankableCount == its cohort board cardinality (root/酒类 parent are
+// informational, no board), a no-rankable-member node count=0, and the
+// un-seeded empty tree.
 import Database from 'better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { fileURLToPath } from 'node:url';
@@ -100,6 +101,10 @@ describe('listCategoryTree', () => {
       'juice-plant',
       'coffee-tea',
       'drinking-water',
+      'dairy',
+      'milk',
+      'yogurt',
+      'lactic-drink',
       'alcohol',
       'baijiu',
       'wine',
@@ -114,7 +119,9 @@ describe('listCategoryTree', () => {
     for (const attr of ['sugar-free', 'sparkling', 'imported']) {
       expect(slugs.has(attr)).toBe(false);
     }
-    expect(tree.length).toBe(13);
+    // 6 soft-drink (软饮 + 4 leaves) + 4 dairy (乳品 + 3 leaves) + 7 alcohol
+    // (酒类 + 6 leaves) + root = 17.
+    expect(tree.length).toBe(17);
   });
 
   it('resolves comparableUnit by inheritance and derives rankable = (unit !== null)', async () => {
@@ -129,8 +136,18 @@ describe('listCategoryTree', () => {
       expect(bySlug.get(leaf)?.comparableUnit).toBe('per_100ml');
       expect(bySlug.get(leaf)?.rankable).toBe(true);
     }
-    // root + alcohol parent + alcohol leaves resolve null → not rankable.
-    for (const slug of ['beverage', 'alcohol', 'baijiu', 'wine', 'beer', 'whisky']) {
+    // 乳品 parent binds per_100ml; its leaves inherit → all rankable (P3.5).
+    for (const slug of ['dairy', 'milk', 'yogurt', 'lactic-drink']) {
+      expect(bySlug.get(slug)?.comparableUnit).toBe('per_100ml');
+      expect(bySlug.get(slug)?.rankable).toBe(true);
+    }
+    // Each 酒种 leaf binds per_100ml on the leaf itself → rankable (P3.5).
+    for (const slug of ['baijiu', 'wine', 'spirits', 'whisky', 'beer', 'sake-fruit-wine']) {
+      expect(bySlug.get(slug)?.comparableUnit).toBe('per_100ml');
+      expect(bySlug.get(slug)?.rankable).toBe(true);
+    }
+    // Only the cross-cohort parents resolve null → not rankable: root + 酒类.
+    for (const slug of ['beverage', 'alcohol']) {
       expect(bySlug.get(slug)?.comparableUnit).toBeNull();
       expect(bySlug.get(slug)?.rankable).toBe(false);
     }
@@ -147,48 +164,59 @@ describe('listCategoryTree', () => {
   });
 
   it('rankableCount counts closure descendants, orthogonal to the node rankable flag', async () => {
-    // 2 carbonated + 1 drinking-water rankable soft-drinks; 1 wine rankable=false.
+    // 2 carbonated + 1 drinking-water rankable soft-drinks; 1 rankable beer
+    // (P3.5: 酒种 leaves are rankable) under the 酒类 parent.
     seedMember(t.handle, { suffix: 'c1', leaf: 'carbonated', per100ml: 0.3, rankable: true });
     seedMember(t.handle, { suffix: 'c2', leaf: 'carbonated', per100ml: 0.4, rankable: true });
     seedMember(t.handle, { suffix: 'w1', leaf: 'drinking-water', per100ml: 0.1, rankable: true });
-    seedMember(t.handle, { suffix: 'wine', leaf: 'wine', per100ml: 0.2, rankable: false });
+    seedMember(t.handle, { suffix: 'beer', leaf: 'beer', per100ml: 0.2, rankable: true });
 
     const tree = await t.repo.listCategoryTree();
     const bySlug = new Map(tree.map((n) => [n.slug, n]));
 
-    // root: rankable=false yet count > 0 (= all 3 rankable soft-drinks).
+    // root: rankable=false yet count > 0 (= 3 soft-drinks + 1 beer).
     expect(bySlug.get('beverage')?.rankable).toBe(false);
-    expect(bySlug.get('beverage')?.rankableCount).toBe(3);
+    expect(bySlug.get('beverage')?.rankableCount).toBe(4);
     // soft-drink parent: union of its leaves' rankable members.
     expect(bySlug.get('soft-drink')?.rankableCount).toBe(3);
     // leaves.
     expect(bySlug.get('carbonated')?.rankableCount).toBe(2);
     expect(bySlug.get('drinking-water')?.rankableCount).toBe(1);
     expect(bySlug.get('juice-plant')?.rankableCount).toBe(0);
-    // alcohol subtree: only a rankable=false wine → count 0.
-    expect(bySlug.get('alcohol')?.rankableCount).toBe(0);
+    // alcohol parent: rankable=false (cross-cohort, cohort-guarded out of any
+    // single board) yet rankableCount > 0 — P3.5 its 酒种 leaf descendants ARE
+    // rankable (no longer 0). Informational branch count, no corresponding board.
+    expect(bySlug.get('alcohol')?.rankable).toBe(false);
+    expect(bySlug.get('alcohol')?.rankableCount).toBe(1);
+    expect(bySlug.get('beer')?.rankableCount).toBe(1);
     expect(bySlug.get('wine')?.rankableCount).toBe(0);
   });
 
-  it('rankableCount per node equals the node board cardinality (root / parent / leaf / alcohol)', async () => {
+  it('rankableCount per can-point-in node equals its cohort board cardinality (root/alcohol parent are informational, no board)', async () => {
     seedMember(t.handle, { suffix: 'c1', leaf: 'carbonated', per100ml: 0.3, rankable: true });
     seedMember(t.handle, { suffix: 'c2', leaf: 'carbonated', per100ml: 0.4, rankable: true });
     seedMember(t.handle, { suffix: 'w1', leaf: 'drinking-water', per100ml: 0.1, rankable: true });
     seedMember(t.handle, { suffix: 'j1', leaf: 'juice-plant', per100ml: 0.5, rankable: true });
+    seedMember(t.handle, { suffix: 'm1', leaf: 'milk', per100ml: 0.6, rankable: true });
+    // P3.5: a rankable beer 酒种 member → 酒类 parent rankableCount > 0.
+    seedMember(t.handle, { suffix: 'b1', leaf: 'beer', per100ml: 0.2, rankable: true });
     // Excluded ones: a rankable soft-drink with NULL per100ml + a rankable=false wine.
     seedMember(t.handle, { suffix: 'cn', leaf: 'carbonated', per100ml: null, rankable: true });
     seedMember(t.handle, { suffix: 'wine', leaf: 'wine', per100ml: 0.2, rankable: false });
 
     const tree = await t.repo.listCategoryTree();
     const bySlug = new Map(tree.map((n) => [n.slug, n]));
+    // can-point-in nodes (rankable=true): rankableCount == cohort board length.
+    // `wine` has only a rankable=false member → board [] and rankableCount 0.
     for (const slug of [
-      'beverage',
       'soft-drink',
       'carbonated',
       'drinking-water',
       'juice-plant',
       'coffee-tea',
-      'alcohol',
+      'dairy',
+      'milk',
+      'beer',
       'wine',
     ]) {
       const board = await t.repo.listRankings({
@@ -198,10 +226,19 @@ describe('listCategoryTree', () => {
       });
       expect(bySlug.get(slug)?.rankableCount).toBe(board.length);
     }
-    // Sanity anchors.
-    expect(bySlug.get('beverage')?.rankableCount).toBe(4); // = default board base
-    expect(bySlug.get('beverage')!.rankableCount).toBeGreaterThan(0);
-    expect(bySlug.get('alcohol')?.rankableCount).toBe(0);
+    // soft-drink board base (carbonated×2 + water×1 + juice×1 = 4 rankable; the
+    // NULL-per100ml carbonated `cn` is excluded by the data gate).
+    expect(bySlug.get('soft-drink')?.rankableCount).toBe(4);
+    expect(bySlug.get('dairy')?.rankableCount).toBe(1);
+    expect(bySlug.get('beer')?.rankableCount).toBe(1);
+    // root + 酒类 parent: rankable=false → informational branch count (no board,
+    // cohort-guarded out at the API). root counts ALL rankable descendants
+    // (4 soft-drink + 1 dairy + 1 beer = 6); 酒类 counts its 酒种 descendants
+    // (1 beer; the wine is rankable=false → not counted). P3.5: alcohol > 0.
+    expect(bySlug.get('beverage')?.rankable).toBe(false);
+    expect(bySlug.get('beverage')?.rankableCount).toBe(6);
+    expect(bySlug.get('alcohol')?.rankable).toBe(false);
+    expect(bySlug.get('alcohol')?.rankableCount).toBe(1);
   });
 
   it('a violated single-attribution (double leaf) still counts the product once', async () => {

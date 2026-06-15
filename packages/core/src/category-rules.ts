@@ -4,8 +4,9 @@
 // in apps/api, by store_category_map) plus a deterministic arbiter; everything
 // here is same-input-same-output.
 //
-// Scope (v1): leaf rules emit a single soft-drink LEAF (no intermediate
-// nodes — `软饮`/`饮料` are reached via is-a closure downstream, not here).
+// Scope: leaf rules emit a single category LEAF across three cohorts
+// (soft-drink / dairy / alcohol) — no intermediate nodes (`软饮`/`乳品`/`酒类`/
+// `饮料` are reached via is-a closure downstream, not here).
 // Persistence-row schemas (tag/product_tag/store_category_map/category_closure)
 // live in packages/db, NOT here. This module only defines the tier1 rule input/
 // output types + shared enums and the pure decision functions.
@@ -37,15 +38,28 @@ export const TagSourceSchema = z.enum(['rule', 'store-map', 'manual']);
 export type TagSource = z.infer<typeof TagSourceSchema>;
 
 /**
- * Stable leaf identifiers for the v1 soft-drink subtree (canonical naming,
- * store-agnostic). These are the only leaves tier1 can emit this period.
- * Mapped to seeded `tag.slug` in packages/db.
+ * Stable leaf identifiers tier1 can emit (canonical naming, store-agnostic).
+ * Mapped to seeded `tag.slug` in packages/db. Three cohorts: soft-drink (4),
+ * dairy (3), and alcohol (6). Each leaf binds/inherits `per_100ml` in the DB
+ * tree — that binding (not this enum) decides rankability.
  */
 export const CategoryLeafSlugSchema = z.enum([
+  // 软饮 cohort.
   'carbonated', // 碳酸饮料 — 含糖配方汽水(可乐/汽水/雪碧)
-  'juice-plant', // 果汁·植物饮
+  'juice-plant', // 果汁·植物饮(含椰子水/燕麦奶/豆浆等植物基,非乳品)
   'coffee-tea', // 咖啡·茶饮(茶饮/咖啡饮料/能量饮料)
   'drinking-water', // 饮用水(气泡水/苏打水归此 + attribute 气泡)
+  // 乳品 cohort (P3.5).
+  'milk', // 牛奶(纯牛奶/鲜牛奶/灭菌乳/巴氏)
+  'yogurt', // 酸奶(酸牛奶)
+  'lactic-drink', // 乳酸菌饮料(活菌型)
+  // 酒类 cohort (P3.5; each 酒种 its own leaf, spirits ≠ whisky).
+  'baijiu', // 白酒
+  'wine', // 葡萄酒
+  'spirits', // 洋酒(白兰地/干邑/伏特加/金酒/朗姆/龙舌兰)
+  'whisky', // 威士忌
+  'beer', // 啤酒
+  'sake-fruit-wine', // 清酒果酒
 ]);
 export type CategoryLeafSlug = z.infer<typeof CategoryLeafSlugSchema>;
 
@@ -127,17 +141,30 @@ interface LeafRule {
   keywords: string[];
 }
 
-// All v1 leaves sit at the same depth (软饮's children), so depth is uniform
-// and `priority` is the primary same-depth tiebreak. `碳酸饮料` is given a
-// higher priority than `饮用水` so that a sugared-cola title carrying an
+// All leaves sit at the same depth (a cohort parent's children), so depth is
+// uniform and `priority` is the primary same-depth tiebreak. `碳酸饮料` is given
+// a higher priority than `饮用水` so that a sugared-cola title carrying an
 // incidental water-ish token still resolves to carbonated; sparkling/soda water
 // is steered to drinking-water purely by its own keywords (苏打水/气泡水), which
 // do NOT include 可乐/汽水 — so 屈臣氏苏打水 hits only drinking-water, never
 // carbonated. The physical "含气" is carried by the `sparkling` attribute, not
 // by the category leaf.
+//
+// CROSS-COHORT ARBITRATION (P3.5): soft-drink leaves MUST outrank dairy/alcohol
+// leaves on co-occurrence ("青岛啤酒风味苏打水" → drinking-water, not beer), so
+// every soft-drink leaf priority is ≥ 10 and every dairy/alcohol leaf priority
+// is < 10. Most cross-cohort mis-grabs are already prevented by the bare-char
+// bans (the错叶 simply never matches: 零度可乐 carries no baijiu keyword because
+// 度 is not a keyword); this priority order is the backstop for titles where a
+// real soft-drink word and a real alcohol/dairy word genuinely co-occur.
 const LEAF_DEPTH = 2;
 
+// Priority bands. Soft-drink ≥ 10 (DRINKING_WATER_PRIORITY); dairy/alcohol < 10.
+const DRINKING_WATER_PRIORITY = 10;
+const NON_SOFT_DRINK_PRIORITY = 5;
+
 const LEAF_RULES: readonly LeafRule[] = [
+  // ---- 软饮 cohort (priority ≥ 10, always outranks dairy/alcohol) ----
   {
     leafSlug: 'carbonated',
     depth: LEAF_DEPTH,
@@ -149,20 +176,164 @@ const LEAF_RULES: readonly LeafRule[] = [
     leafSlug: 'juice-plant',
     depth: LEAF_DEPTH,
     priority: 20,
-    keywords: ['果汁', '果蔬汁', '植物饮', '椰汁', '豆奶'],
+    // 果汁类一律全词(果汁/葡萄汁/山楂汁…),禁裸 果/葡萄/山楂,故与 葡萄酒/果酒/
+    // 山楂酒 不为子串、不碰撞;植物基 椰子水/燕麦奶/豆浆/坚果乳 归此(非乳品)。
+    keywords: [
+      '果汁',
+      '果蔬汁',
+      '橙汁',
+      'nfc',
+      '西梅汁',
+      '桑葚汁',
+      '葡萄汁',
+      '醋饮',
+      '山楂汁',
+      '植物饮',
+      '植物蛋白饮',
+      '椰子水',
+      '椰汁',
+      '椰奶',
+      '燕麦奶',
+      '豆浆',
+      '豆奶',
+      '坚果乳',
+    ],
   },
   {
     leafSlug: 'coffee-tea',
     depth: LEAF_DEPTH,
     priority: 20,
-    keywords: ['茶', '咖啡', '能量饮', '拿铁', '美式'],
+    keywords: [
+      '茶',
+      '咖啡',
+      '能量饮',
+      '拿铁',
+      '美式',
+      '浓缩液',
+      '黑咖',
+      '本草饮',
+      '麦冬',
+    ],
   },
   {
     leafSlug: 'drinking-water',
     depth: LEAF_DEPTH,
-    priority: 10,
-    // 苏打水/气泡水/含气矿泉 + 普通矿泉水/纯净水。气泡由 attribute 承载。
-    keywords: ['苏打水', '气泡水', '含气矿泉', '矿泉水', '纯净水', '饮用水'],
+    priority: DRINKING_WATER_PRIORITY,
+    // 苏打水/气泡水/含气矿泉 + 普通矿泉水/纯净水 + 电解质水/泉水。气泡由 attribute 承载。
+    keywords: [
+      '苏打水',
+      '气泡水',
+      '含气矿泉',
+      '矿泉水',
+      '纯净水',
+      '饮用水',
+      '电解质水',
+      '泉水',
+    ],
+  },
+  // ---- 乳品 cohort (priority < 10; 禁裸 奶,用全词以免 椰奶/稀奶油 误命中) ----
+  {
+    leafSlug: 'milk',
+    depth: LEAF_DEPTH,
+    priority: NON_SOFT_DRINK_PRIORITY,
+    keywords: ['牛奶', '鲜牛奶', '纯牛奶', '灭菌乳', '巴氏', '风味奶'],
+  },
+  {
+    leafSlug: 'yogurt',
+    depth: LEAF_DEPTH,
+    priority: NON_SOFT_DRINK_PRIORITY,
+    keywords: ['酸奶', '酸牛奶'],
+  },
+  {
+    leafSlug: 'lactic-drink',
+    depth: LEAF_DEPTH,
+    priority: NON_SOFT_DRINK_PRIORITY,
+    keywords: ['乳酸菌', '活菌型'],
+  },
+  // ---- 酒类 cohort (priority < 10; 全词/型号/品牌词,禁裸单字) ----
+  {
+    leafSlug: 'beer',
+    depth: LEAF_DEPTH,
+    priority: NON_SOFT_DRINK_PRIORITY,
+    // 禁裸 啤(撞 啤梨汁)。
+    keywords: ['啤酒', '精酿', 'ipa', '拉格', '世涛', '小麦啤'],
+  },
+  {
+    leafSlug: 'wine',
+    depth: LEAF_DEPTH,
+    priority: NON_SOFT_DRINK_PRIORITY,
+    // 香槟 必须带酒(香槟酒);禁裸 香槟/庄园/BIN。
+    keywords: [
+      '葡萄酒',
+      '红酒',
+      '干红',
+      '干白',
+      '赤霞珠',
+      '西拉',
+      '黑皮诺',
+      '长相思',
+      '梅洛',
+      '起泡酒',
+      '香槟酒',
+      '冰酒',
+    ],
+  },
+  {
+    leafSlug: 'baijiu',
+    depth: LEAF_DEPTH,
+    priority: NON_SOFT_DRINK_PRIORITY,
+    // 禁裸 度/浓香/酱香(撞 零度可乐/咖啡描述)——只用全词型/品牌词。
+    keywords: [
+      '白酒',
+      '茅台',
+      '五粮液',
+      '泸州老窖',
+      '国窖',
+      '洋河',
+      '梦之蓝',
+      '海之蓝',
+      '汾酒',
+      '酱香型白酒',
+      '浓香型白酒',
+    ],
+  },
+  {
+    leafSlug: 'sake-fruit-wine',
+    depth: LEAF_DEPTH,
+    priority: NON_SOFT_DRINK_PRIORITY,
+    // 全词 果酒/梅酒(⊄ 果汁,不与 juice-plant 碰撞)。
+    keywords: ['清酒', '大吟酿', '纯米', '獭祭', '山田锦', '果酒', '梅酒', '青梅酒'],
+  },
+  {
+    leafSlug: 'spirits',
+    depth: LEAF_DEPTH,
+    priority: NON_SOFT_DRINK_PRIORITY,
+    keywords: [
+      '洋酒',
+      '白兰地',
+      '干邑',
+      '伏特加',
+      '金酒',
+      '朗姆',
+      '龙舌兰',
+      '轩尼诗',
+      '人头马',
+      '绝对伏特加',
+    ],
+  },
+  {
+    leafSlug: 'whisky',
+    depth: LEAF_DEPTH,
+    priority: NON_SOFT_DRINK_PRIORITY,
+    keywords: [
+      '威士忌',
+      'whisky',
+      'whiskey',
+      '麦卡伦',
+      '单一麦芽',
+      '苏格兰威士忌',
+      '波本',
+    ],
   },
 ];
 
