@@ -37,6 +37,13 @@ id = "321e4dd69ec34147b48677ad7d9959b6"
 # --- production environment ---
 [env.production]
 name = "unit-price-api"
+# China-reachable front: Aliyun CDN (ICP-filed unit-price.herbert-dev.cn, domestic
+# scope) origins to this Cloudflare custom domain. A custom domain (not workers.dev)
+# is required because *.workers.dev is SNI-blocked in mainland, even as a CDN origin.
+# Keep workers.dev enabled too: it's the legacy/devtools BASE and adding a route
+# would otherwise disable it (wrangler defaults workers_dev=false once a route exists).
+workers_dev = true
+routes = [{ pattern = "unit-price.herbertgao.me", custom_domain = true }]
 
 [[env.production.d1_databases]]
 binding = "DB"
