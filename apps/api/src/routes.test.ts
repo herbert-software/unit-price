@@ -1043,6 +1043,33 @@ describe('GET /categories — full category is-a tree, only the category axis', 
   });
 });
 
+describe('public GET endpoints are edge-cacheable on 200, never on errors', () => {
+  it('/rankings 200 → public, max-age Cache-Control (edge cache enabled)', async () => {
+    const { app } = rankingsApp(SNAPSHOT);
+    const { res } = await getRankings(app);
+    expect(res.status).toBe(200);
+    const cc = res.headers.get('cache-control') ?? '';
+    expect(cc).toMatch(/public/);
+    expect(cc).toMatch(/max-age=\d+/);
+  });
+
+  it('/categories 200 → public, max-age Cache-Control', async () => {
+    const { app } = categoriesApp(TREE);
+    const { res } = await getCategories(app);
+    expect(res.status).toBe(200);
+    const cc = res.headers.get('cache-control') ?? '';
+    expect(cc).toMatch(/public/);
+    expect(cc).toMatch(/max-age=\d+/);
+  });
+
+  it('/rankings 400 (invalid) carries NO Cache-Control — a cached error must never be served', async () => {
+    const { app } = rankingsApp(SNAPSHOT);
+    const { res } = await getRankings(app, '?limit=0');
+    expect(res.status).toBe(400);
+    expect(res.headers.get('cache-control')).toBeNull();
+  });
+});
+
 describe('GET /categories — comparableUnit / rankable per node (P3.5 收敛)', () => {
   it('soft-drink/dairy/酒种叶: per_100ml + rankable=true; alcohol parent+root: null + rankable=false', async () => {
     const { app } = categoriesApp(TREE);
