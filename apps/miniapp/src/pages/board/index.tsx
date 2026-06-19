@@ -5,7 +5,7 @@
 // Reuses the 榜单 Tab's tested data layer VERBATIM: useRankings(category) threads
 // the category slug into buildRankingsUrl → GET /rankings?category=<slug>. Same
 // three-state render + pagination + page-error semantics; only the header chrome
-// (brand / search / scope / chips / ads) is dropped — a board is just the list.
+// (brand / search / scope / ads) is dropped — a board is just the list.
 import { View } from '@tarojs/components';
 import Taro, { useRouter, useLoad, usePullDownRefresh, useReachBottom } from '@tarojs/taro';
 import { useRankings } from '../index/useRankings';
