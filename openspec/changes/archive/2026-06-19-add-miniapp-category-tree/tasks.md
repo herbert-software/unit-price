@@ -24,8 +24,8 @@
 ## 5. 校验
 
 - [x] 5.1 `vitest run apps/miniapp/.../tree.test.ts` 通过;`tsc --noEmit -p apps/miniapp/tsconfig.json` 无新增类型错(仅既有 tsconfig 弃用告警)
-- [ ] 5.2 [手动验证] 微信 devtools 勾「不校验合法域名」,进 `分类` Tab:树渲染、点可比品类进榜、下拉刷新 / 触底分页、root/parent 不可点、空 / 错态正常
-- [ ] 5.3 [手动验证] `pnpm --filter @unit-price/miniapp build:weapp` 打包通过(api-client/core 先构建)
+- [x] 5.2 [手动验证] 微信 devtools 进 `分类` Tab 渲染并联调(并修了占位卡横向溢出);域名走 ICP 后已配「请求合法域名」
+- [x] 5.3 [手动验证] `pnpm --filter @unit-price/miniapp build:weapp` 打包通过(api-client/core 先构建)
 
 ## 6. 对抗 review 修复(review-loop 两轮)
 
