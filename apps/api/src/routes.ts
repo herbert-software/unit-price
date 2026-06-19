@@ -131,6 +131,18 @@ export const MAX_BATCH = 40;
 export const BG_POOL = 5;
 
 /**
+ * Cache-Control for the public read-only GET endpoints (/rankings, /categories).
+ * Set ONLY on the 200 success path so the edge layers already in front of the
+ * worker — Aliyun CDN's China POP (the front of the slow cross-border hop) and
+ * Cloudflare — cache the JSON and most reads never reach the worker/D1. 300s (5
+ * min) trades freshness for hit rate: ingests are infrequent manual batches, so
+ * this staleness is acceptable. Errors (400/500) carry no header → never cached.
+ * Tune the TTL here. (Aliyun CDN keeps the query string in its cache key by
+ * default, so /rankings?category=… variants cache separately.)
+ */
+export const PUBLIC_CACHE_CONTROL = 'public, max-age=300';
+
+/**
  * Batch ingest request: an envelope of 1..MAX_BATCH single-item contributions.
  * Reuses ContributeRequestSchema for each item (single-item fields are NOT
  * redefined — schema SOT). Strict: any item failing ContributeRequestSchema, an
@@ -556,6 +568,9 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
     if (!validated.success) {
       return c.json({ error: 'internal', message: 'response failed validation' }, 500);
     }
+    // Edge-cacheable (Aliyun CDN POP + Cloudflare) — only this 200 path; the
+    // 400/500 above carry no Cache-Control and are never cached.
+    c.header('Cache-Control', PUBLIC_CACHE_CONTROL);
     return c.json(validated.data, 200);
   });
 
@@ -591,6 +606,8 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
     if (!validated.success) {
       return c.json({ error: 'internal', message: 'response failed validation' }, 500);
     }
+    // Edge-cacheable like /rankings; the category tree changes even less often.
+    c.header('Cache-Control', PUBLIC_CACHE_CONTROL);
     return c.json(validated.data, 200);
   });
 
