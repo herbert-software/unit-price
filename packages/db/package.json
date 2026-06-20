@@ -26,10 +26,10 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.9.2",
-    "better-sqlite3": "^12.10.0",
+    "better-sqlite3": "^12.11.1",
     "drizzle-kit": "^0.31.10",
-    "miniflare": "^4.20260609.0",
+    "miniflare": "^4.20260617.1",
     "tsx": "^4.22.4",
-    "vitest": "^4.1.8"
+    "vitest": "^4.1.9"
   }
 }
