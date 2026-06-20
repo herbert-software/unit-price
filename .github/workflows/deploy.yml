@@ -52,7 +52,7 @@ jobs:
       # invocations pass --config apps/api/wrangler.toml so migrations_dir's
       # ../../ resolves to packages/db/drizzle from apps/api/.
       - name: Wrangler deploy dry-run (preview)
-        uses: cloudflare/wrangler-action@v3
+        uses: cloudflare/wrangler-action@v4
         with:
           command: deploy --dry-run --env preview --config apps/api/wrangler.toml
 
@@ -90,13 +90,13 @@ jobs:
       # ahead of its schema. migrations_dir is resolved from apps/api/ via
       # --config; idempotency is enforced by wrangler's own d1_migrations table.
       - name: Apply production D1 migrations
-        uses: cloudflare/wrangler-action@v3
+        uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           command: d1 migrations apply DB --env production --remote --config apps/api/wrangler.toml
 
       - name: Deploy to production
-        uses: cloudflare/wrangler-action@v3
+        uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           command: deploy --env production --config apps/api/wrangler.toml
