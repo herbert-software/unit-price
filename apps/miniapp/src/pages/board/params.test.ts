@@ -22,29 +22,27 @@ describe('readBoardParams', () => {
   });
 });
 
-// NOTE: these q tests are decode-strategy-CONDITIONAL. They simulate the documented
-// assumption "Taro onLoad decodes the query once" by feeding readBoardParams the
-// ALREADY-DECODED value (what SearchEntry's single encodeURIComponent + one onLoad
-// decode yields). They do NOT prove the platform's actual decode count — that is
-// pinned only by the real-device measurement in task 5.3.
-describe('readBoardParams — q (deterministic, no second decode)', () => {
-  it('passes a plain CJK q through unchanged', () => {
-    expect(readBoardParams({ q: '可乐' }).q).toBe('可乐');
+// Taro hands params RAW (task 5.3): the value here is SearchEntry's
+// encodeURIComponent output, so readBoardParams decodes it exactly once. Feed encoded
+// inputs and assert the decoded term, matching the real end-to-end round-trip.
+describe('readBoardParams — q (decode once)', () => {
+  it('decodes a plain CJK q', () => {
+    expect(readBoardParams({ q: encodeURIComponent('可乐') }).q).toBe('可乐');
   });
 
-  it('preserves a literal valid-looking escape byte-for-byte (no double decode)', () => {
-    // The killer case: a SECOND decodeURIComponent would fold `%20` → space,
-    // silently rewriting `100%20纯` to `100 纯`. readBoardParams must NOT decode q.
-    expect(readBoardParams({ q: '100%20纯' }).q).toBe('100%20纯');
-    expect(readBoardParams({ q: 'a%20b' }).q).toBe('a%20b');
+  it('round-trips a term containing a literal escape (no over/under decode)', () => {
+    // SearchEntry sends encodeURIComponent('100%20纯') = '100%2520%E7%BA%AF';
+    // exactly one decode here must restore '100%20纯', not fold %20 → space.
+    expect(readBoardParams({ q: encodeURIComponent('100%20纯') }).q).toBe('100%20纯');
+    expect(readBoardParams({ q: encodeURIComponent('a%20b') }).q).toBe('a%20b');
   });
 
-  it('preserves an incomplete escape byte-for-byte (would throw if re-decoded)', () => {
+  it('round-trips a term containing a literal + (encodeURIComponent → %2B)', () => {
+    expect(readBoardParams({ q: encodeURIComponent('100+200') }).q).toBe('100+200');
+  });
+
+  it('falls back to raw on a malformed escape (hand-typed route, no crash)', () => {
     expect(readBoardParams({ q: '100%' }).q).toBe('100%');
-  });
-
-  it('preserves a literal + byte-for-byte (no `+`→space query folding)', () => {
-    expect(readBoardParams({ q: '100+200' }).q).toBe('100+200');
   });
 
   it('q absent → undefined; blank q → undefined (not a search)', () => {
