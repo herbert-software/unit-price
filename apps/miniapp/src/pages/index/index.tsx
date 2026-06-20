@@ -5,8 +5,9 @@
 // Consumes prod GET /rankings via @unit-price/api-client (buildRankingsUrl +
 // parseRankingsResponse, jitless) over Taro.request — wired through useRankings.
 // NO entry/scan/photo path, NO core tier1/calc on device: the list is
-// already-computed per100ml from /rankings. The search entry is a placeholder
-// only — it NEVER requests and NEVER reorders the list.
+// already-computed per100ml from /rankings. The search entry is a real input that,
+// on confirm, navigates to the board list page reused for search (GET /rankings?q=…,
+// still READ-ONLY); it NEVER computes or reorders the list on device.
 //
 // Data layer (the state machine + Taro lifecycle hooks) stays in the page (D4);
 // the components are pure presentation. Renders the spec's three states (loading
@@ -35,13 +36,10 @@ function Header() {
   return (
     <Fragment>
       <BrandHead />
-      <SearchEntry
-        onClick={() => {
-          // Placeholder only: a "敬请期待" toast. NO navigation, NO request, NO
-          // input/focus state. Real search is P4 (spec / D5).
-          void Taro.showToast({ title: '敬请期待', icon: 'none' });
-        }}
-      />
+      {/* Real input: on confirm it navigates to the board list page reused for
+          search (board?q=…). NO request fires here; the board page makes the
+          read-only GET /rankings?q=… call. See SearchEntry. */}
+      <SearchEntry />
       <ScopeBar />
     </Fragment>
   );

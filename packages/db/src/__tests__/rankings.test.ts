@@ -17,8 +17,10 @@ import { fileURLToPath } from 'node:url';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createDb, type Db } from '../db.js';
 import {
+  buildRankableCountQuery,
   buildRankingsQuery,
   createRepository,
+  escapeLikePattern,
   type Repository,
 } from '../repository.js';
 import { seedTaxonomy } from '../seed.js';
@@ -679,6 +681,320 @@ describe('listRankings (node-scoped)', () => {
     });
     expect(row.sourceUrl).toBeNull();
   });
+
+  // --- q (title substring) push-down ------------------------------------
+
+  it('q non-empty returns only title-substring matches, still per100ml ASC', async () => {
+    // Three carbonated rows; only two carry the 「可乐」 substring. The matched
+    // pair must come back per100ml ASC (the filter is orthogonal to ordering).
+    seedRow(t.handle, {
+      suffix: 'cola-cheap',
+      per100ml: 0.2,
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      title: '可口可乐 330ml*24',
+    });
+    seedRow(t.handle, {
+      suffix: 'sprite',
+      per100ml: 0.1, // cheaper, but no 可乐 substring → excluded
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      title: '雪碧 330ml*24',
+    });
+    seedRow(t.handle, {
+      suffix: 'cola-pricey',
+      per100ml: 0.5,
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      title: '百事可乐 500ml*12',
+    });
+    const rows = await t.repo.listRankings({
+      limit: 50,
+      offset: 0,
+      category: 'beverage',
+      q: '可乐',
+    });
+    // Only the two 可乐 rows, ascending per100ml (cheap before pricey); 雪碧 gone.
+    expect(rows.map((r) => r.id)).toEqual(['up-cola-cheap', 'up-cola-pricey']);
+    expect(rows.map((r) => r.per100ml)).toEqual([0.2, 0.5]);
+  });
+
+  it('q paginates correctly across pages (hits split by limit/offset, no overlap)', async () => {
+    // Four 可乐 matches at distinct per100ml + one non-match. Page the matches.
+    seedRow(t.handle, {
+      suffix: 'q1',
+      per100ml: 0.1,
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      title: '可乐 A',
+    });
+    seedRow(t.handle, {
+      suffix: 'q2',
+      per100ml: 0.2,
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      title: '可乐 B',
+    });
+    seedRow(t.handle, {
+      suffix: 'q3',
+      per100ml: 0.3,
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      title: '可乐 C',
+    });
+    seedRow(t.handle, {
+      suffix: 'q4',
+      per100ml: 0.4,
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      title: '可乐 D',
+    });
+    seedRow(t.handle, {
+      suffix: 'nomatch',
+      per100ml: 0.05, // cheapest of all, yet excluded — no 可乐 substring
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      title: '矿泉水 550ml',
+    });
+    const page1 = await t.repo.listRankings({
+      limit: 2,
+      offset: 0,
+      category: 'beverage',
+      q: '可乐',
+    });
+    const page2 = await t.repo.listRankings({
+      limit: 2,
+      offset: 2,
+      category: 'beverage',
+      q: '可乐',
+    });
+    expect(page1.map((r) => r.id)).toEqual(['up-q1', 'up-q2']);
+    expect(page2.map((r) => r.id)).toEqual(['up-q3', 'up-q4']);
+    // Union covers all four matches exactly once; the non-match never appears.
+    const all = [...page1, ...page2].map((r) => r.id);
+    expect(new Set(all).size).toBe(4);
+    expect(all).not.toContain('up-nomatch');
+  });
+
+  it('q keeps the cohort guard — does not leak cross-cohort title matches', async () => {
+    // A beer and a soft-drink, both titled 「可乐」. A 可乐 search scoped to the
+    // soft-drink cohort must NOT pull the (cross-cohort) beer in via the title
+    // filter — the closure/cohort guard is ANDed, never replaced.
+    seedRow(t.handle, {
+      suffix: 'softcola',
+      per100ml: 0.3,
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      leaf: 'carbonated',
+      title: '可乐味汽水 330ml',
+    });
+    seedRow(t.handle, {
+      suffix: 'beercola',
+      per100ml: 0.2, // cheaper, but a different cohort
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      leaf: 'beer',
+      title: '可乐味啤酒 500ml',
+    });
+    const softDrink = await t.repo.listRankings({
+      limit: 50,
+      offset: 0,
+      category: 'soft-drink',
+      q: '可乐',
+    });
+    // Only the soft-drink 可乐 — the beer 可乐 is out of cohort.
+    expect(softDrink.map((r) => r.id)).toEqual(['up-softcola']);
+  });
+
+  it('q keeps the rankable + per100ml guards (no q-bypass of either gate)', async () => {
+    // Two 可乐 rows: one rankable with per100ml, one rankable=false (cheaper),
+    // one rankable with NULL per100ml. The title filter must NOT resurrect the
+    // gated-out rows.
+    seedRow(t.handle, {
+      suffix: 'ok',
+      per100ml: 0.5,
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      title: '可乐 OK',
+      rankable: true,
+    });
+    seedRow(t.handle, {
+      suffix: 'notrankable',
+      per100ml: 0.1, // cheaper, but rankable=0 → excluded
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      title: '可乐 不可排',
+      rankable: false,
+    });
+    seedRow(t.handle, {
+      suffix: 'nullml',
+      per100ml: null, // per100ml NULL → excluded
+      per100g: 1.0,
+      formula: 'f-weight',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      title: '可乐 无单价',
+      rankable: true,
+    });
+    const rows = await t.repo.listRankings({
+      limit: 50,
+      offset: 0,
+      category: 'beverage',
+      q: '可乐',
+    });
+    expect(rows.map((r) => r.id)).toEqual(['up-ok']);
+  });
+
+  it('q LIKE specials match literally (% / _ / escape char), not as wildcards', async () => {
+    // Literal 「100%」 must match only the row containing the literal percent,
+    // never every row (which a raw % wildcard would). Same shape proves _ and
+    // the escape char are literal too.
+    seedRow(t.handle, {
+      suffix: 'pct',
+      per100ml: 0.3,
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      title: '100%纯果汁 1L',
+    });
+    seedRow(t.handle, {
+      suffix: 'other',
+      per100ml: 0.1,
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      title: '某饮料 500ml',
+    });
+    const pct = await t.repo.listRankings({
+      limit: 50,
+      offset: 0,
+      category: 'beverage',
+      q: '100%',
+    });
+    // Literal %: only the 100% row, NOT the other row.
+    expect(pct.map((r) => r.id)).toEqual(['up-pct']);
+
+    // Underscore literal: a query 「0_纯」 must NOT match 「0X纯」-style single-char.
+    seedRow(t.handle, {
+      suffix: 'underscore',
+      per100ml: 0.4,
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      title: 'a_b 饮料',
+    });
+    seedRow(t.handle, {
+      suffix: 'underscore-decoy',
+      per100ml: 0.05,
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      title: 'aXb 饮料', // would match if _ were a wildcard
+    });
+    const us = await t.repo.listRankings({
+      limit: 50,
+      offset: 0,
+      category: 'beverage',
+      q: 'a_b',
+    });
+    expect(us.map((r) => r.id)).toEqual(['up-underscore']);
+  });
+
+  it('q with a literal ! matches only the literal-! title (! self-escaped, NOT the ESCAPE char)', async () => {
+    // End-to-end SQLite proof of the escape-char self-escaping (escapeLikePattern
+    // !→!!): a q containing the literal escape char `!` must match the `!`
+    // LITERALLY under `LIKE ? ESCAPE '!'`. The target carries a real `!`; the
+    // decoys make a WRONG impl (one that left `!` un-self-escaped) fail:
+    //   q='酒!特' correct → pattern '%酒!!特%' matches the literal `酒!特` substring.
+    //   q='酒!特' WRONG   → pattern '%酒!特%' where the lone `!` escapes the next
+    //                       char `特` → collapses to the literal `酒特`, so it would
+    //                       MISS the target AND wrongly match the no-`!` decoy below.
+    seedRow(t.handle, {
+      suffix: 'bang',
+      per100ml: 0.3,
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      title: '啤酒!特价 330ml', // the literal `!` — the only intended match
+    });
+    seedRow(t.handle, {
+      suffix: 'bang-nobang',
+      per100ml: 0.1, // cheaper, yet excluded: no literal `!`
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      title: '啤酒特价 330ml', // a WRONG (un-self-escaped) impl WOULD match this
+    });
+    seedRow(t.handle, {
+      suffix: 'bang-neighbour',
+      per100ml: 0.2, // cheaper, yet excluded: `X` is not the literal `!`
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      title: '啤酒X特价 330ml', // neighbour char in place of `!`
+    });
+    const rows = await t.repo.listRankings({
+      limit: 50,
+      offset: 0,
+      category: 'beverage',
+      q: '酒!特',
+    });
+    // ONLY the literal-`!` row. (Fails if `!` were treated as the ESCAPE char:
+    // a wrong impl would return up-bang-nobang and drop up-bang.)
+    expect(rows.map((r) => r.id)).toEqual(['up-bang']);
+  });
+
+  it('q zero-hit returns [] (not an error)', async () => {
+    seedRow(t.handle, {
+      suffix: 'only',
+      per100ml: 0.3,
+      formula: 'f',
+      upConfidence: 0.95,
+      productConfidence: 0.5,
+      warnings: '[]',
+      title: '雪碧 330ml',
+    });
+    await expect(
+      t.repo.listRankings({
+        limit: 50,
+        offset: 0,
+        category: 'beverage',
+        q: '不存在的词',
+      }),
+    ).resolves.toEqual([]);
+  });
 });
 
 /**
@@ -774,6 +1090,190 @@ describe('listRankings query plan (node path)', () => {
     // (A SCAN of the driving table product/product_tag and a TEMP B-TREE for
     // ORDER BY / DISTINCT are permitted and intentionally not asserted against.)
 
+    t.handle.close();
+  });
+
+  it('q-absent SQL is byte-identical to the no-q board (no LIKE, plan unchanged)', async () => {
+    // Structural guarantee: an absent `q` constructs NO title LIKE clause, so
+    // the production SQL — and thus its EXPLAIN — is byte-for-byte the same as
+    // before `q` existed. `and()` drops the undefined predicate.
+    const t = await openDb();
+    const carbonatedId = tagId(t.handle, 'carbonated');
+    const orm = drizzle(t.handle);
+    const { sql } = buildRankingsQuery(orm, carbonatedId, {
+      limit: 50,
+      offset: 0,
+    }).toSQL();
+    expect(sql).not.toMatch(/LIKE/i);
+    // Passing q: undefined / '' must be identical to omitting it entirely.
+    const omitted = buildRankingsQuery(orm, carbonatedId, {
+      limit: 50,
+      offset: 0,
+    }).toSQL().sql;
+    const undef = buildRankingsQuery(orm, carbonatedId, {
+      limit: 50,
+      offset: 0,
+      q: undefined,
+    }).toSQL().sql;
+    const empty = buildRankingsQuery(orm, carbonatedId, {
+      limit: 50,
+      offset: 0,
+      q: '',
+    }).toSQL().sql;
+    expect(undef).toBe(omitted);
+    expect(empty).toBe(omitted);
+    t.handle.close();
+  });
+
+  it('q-present plan: closure + unit_price still SEARCH USING INDEX; title LIKE is a residual filter', async () => {
+    // With `q` the only change is a residual `product_raw.title LIKE ?` on the
+    // already-PK-reached product_raw row — the index-probe shape on
+    // category_closure + unit_price is unchanged. We assert the two probes still
+    // use their unique indexes and the LIKE rides on product_raw; we deliberately
+    // do NOT assert "must SCAN product_raw" (brittle — product_raw is already
+    // reached by PK join, the LIKE is just a residual on that row).
+    const t = await openDb();
+    const carbonatedId = tagId(t.handle, 'carbonated');
+    const insRaw = t.handle.prepare(
+      `INSERT INTO product_raw (id, store, store_sku, title, price, captured_at) VALUES (?,?,?,?,?,?)`,
+    );
+    const insProd = t.handle.prepare(
+      `INSERT INTO product (id, raw_id, multipliers, category, confidence, dedupe_key, rankable) VALUES (?,?,?,?,?,?,?)`,
+    );
+    const insUp = t.handle.prepare(
+      `INSERT INTO unit_price (id, product_id, per100ml, per100g, formula, confidence, warnings) VALUES (?,?,?,?,?,?,?)`,
+    );
+    const insPt = t.handle.prepare(
+      `INSERT INTO product_tag (id, product_id, tag_id, source, confidence) VALUES (?,?,?,'rule',1)`,
+    );
+    const tx = t.handle.transaction(() => {
+      for (let i = 0; i < 300; i++) {
+        insRaw.run(`r${i}`, 'sam', `sku${i}`, `可乐${i}`, 100 + i, 1000);
+        insProd.run(`p${i}`, `r${i}`, '[1]', 'beverage', 0.5, `dk${i}`, 1);
+        insUp.run(
+          `u${i}`,
+          `p${i}`,
+          i % 7 === 0 ? null : i * 0.01,
+          null,
+          'f',
+          0.95,
+          '[]',
+        );
+        insPt.run(`pt${i}`, `p${i}`, carbonatedId);
+      }
+    });
+    tx();
+    t.handle.exec('ANALYZE');
+
+    const orm = drizzle(t.handle);
+    const { sql: prodSql, params } = buildRankingsQuery(orm, carbonatedId, {
+      limit: 50,
+      offset: 0,
+      q: '可乐',
+    }).toSQL();
+    // The SQL carries the residual LIKE on product_raw.title with ESCAPE '!'.
+    expect(prodSql).toMatch(
+      /"product_raw"\."title" LIKE \? ESCAPE '!'/,
+    );
+
+    const plan = t.handle
+      .prepare('EXPLAIN QUERY PLAN ' + prodSql)
+      .all(...params) as Array<{ detail: string }>;
+    const details = plan.map((p) => p.detail);
+
+    // The index probes are unchanged by the residual title filter.
+    expect(
+      details.some((d) =>
+        /SEARCH\b.*\bcategory_closure\b.*USING INDEX category_closure_tag_id_ancestor_tag_id_unique/.test(
+          d,
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      details.some((d) =>
+        /SEARCH\b.*\bunit_price\b.*USING INDEX unit_price_product_id_unique/.test(
+          d,
+        ),
+      ),
+    ).toBe(true);
+    // category_closure still must not degrade to a SCAN.
+    expect(details.some((d) => /\bSCAN\b\s+category_closure\b/.test(d))).toBe(
+      false,
+    );
+
+    t.handle.close();
+  });
+});
+
+/**
+ * `escapeLikePattern` unit tests: the LIKE specials (`%`, `_`, the escape char
+ * `!`) must each be prefixed with `!` so they match LITERALLY under
+ * `... LIKE ? ESCAPE '!'`. The escape char escapes itself; no over/under
+ * escaping; the surrounding `%…%` wildcards are NOT this function's job (the
+ * caller adds them and they stay wildcards).
+ */
+describe('escapeLikePattern', () => {
+  it('escapes % so it matches literally (not as a wildcard)', () => {
+    expect(escapeLikePattern('100%')).toBe('100!%');
+  });
+
+  it('escapes _ so it matches a literal underscore (not any single char)', () => {
+    expect(escapeLikePattern('a_b')).toBe('a!_b');
+  });
+
+  it('escapes the escape char ! by doubling it (escapes itself)', () => {
+    expect(escapeLikePattern('a!b')).toBe('a!!b');
+  });
+
+  it('escapes a mix of all three specials in one pass, no double-processing', () => {
+    // !→!!, %→!%, _→!_, each exactly once; the inserted ! is never re-escaped.
+    expect(escapeLikePattern('!%_')).toBe('!!!%!_');
+    expect(escapeLikePattern('100%_a!b')).toBe('100!%!_a!!b');
+  });
+
+  it('leaves non-special chars (incl. CJK) untouched — no over-escaping', () => {
+    expect(escapeLikePattern('可乐')).toBe('可乐');
+    expect(escapeLikePattern('100+200')).toBe('100+200'); // + is not a LIKE special
+    expect(escapeLikePattern('')).toBe('');
+  });
+
+  it('the wrapping %…% wildcards are NOT passed through escapeLikePattern (only the inner word is escaped; outer % stays a wildcard)', () => {
+    // buildRankingsQuery wraps as '%' + escapeLikePattern(q) + '%'. The outer %
+    // are appended OUTSIDE the escape — so they remain wildcards. If the outer %
+    // were escaped, the pattern would be a literal `%...%` and match nothing.
+    const inner = escapeLikePattern('可乐');
+    const pattern = '%' + inner + '%';
+    expect(pattern).toBe('%可乐%'); // leading/trailing % are bare wildcards
+    expect(pattern.startsWith('%')).toBe(true);
+    expect(pattern.startsWith('!%')).toBe(false);
+    expect(pattern.endsWith('%')).toBe(true);
+    expect(pattern.endsWith('!%')).toBe(false);
+  });
+});
+
+/**
+ * Regression guard: `buildRankableCountQuery` must stay q-pure (it ALWAYS passes
+ * `undefined` for the extra predicate) so the tree's rankableCount can never
+ * drift from the no-q board's row count. The baseline string below was captured
+ * from the builder BEFORE the `extra?` parameter was added; after the change the
+ * `.toSQL().sql` must be byte-for-byte identical (no LIKE, no q leakage).
+ */
+describe('buildRankableCountQuery (q-pure regression)', () => {
+  // Honest baseline: captured from the pre-`extra?` builder via .toSQL().sql.
+  const BASELINE_COUNT_SQL =
+    'select count(distinct "product"."id") from "unit_price" inner join "product" on "product"."id" = "unit_price"."product_id" inner join "product_raw" on "product_raw"."id" = "product"."raw_id" inner join "product_tag" on "product_tag"."product_id" = "product"."id" inner join "category_closure" on "category_closure"."tag_id" = "product_tag"."tag_id" where ("category_closure"."ancestor_tag_id" = ? and "product"."rankable" = ? and "unit_price"."per100ml" is not null)';
+
+  it('emits byte-identical SQL to the pre-q baseline (no LIKE, count unaffected by q)', async () => {
+    const t = await openDb();
+    const carbonatedId = tagId(t.handle, 'carbonated');
+    const orm = drizzle(t.handle);
+    const { sql } = (
+      buildRankableCountQuery(orm, carbonatedId) as unknown as {
+        toSQL: () => { sql: string; params: unknown[] };
+      }
+    ).toSQL();
+    expect(sql).toBe(BASELINE_COUNT_SQL);
+    expect(sql).not.toMatch(/LIKE/i);
     t.handle.close();
   });
 });

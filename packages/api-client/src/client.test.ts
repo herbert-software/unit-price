@@ -56,6 +56,24 @@ describe('buildRankingsUrl', () => {
     ).toBe('https://api.example.com/rankings?limit=20&offset=40&category=beverage');
   });
 
+  it('appends q= with encodeURIComponent-encoded value (CJK)', () => {
+    expect(buildRankingsUrl('https://api.example.com', { q: '可乐' })).toBe(
+      'https://api.example.com/rankings?q=%E5%8F%AF%E4%B9%90',
+    );
+  });
+
+  it('omits q entirely when not given (URL identical to current no-q behavior)', () => {
+    expect(buildRankingsUrl('https://api.example.com', { limit: 50, offset: 100 })).toBe(
+      'https://api.example.com/rankings?limit=50&offset=100',
+    );
+  });
+
+  it('serializes q alongside category in declared order', () => {
+    expect(buildRankingsUrl('https://api.example.com', { category: 'beverage', q: '可乐' })).toBe(
+      'https://api.example.com/rankings?category=beverage&q=%E5%8F%AF%E4%B9%90',
+    );
+  });
+
   it('fail-fast: base with a path segment throws', () => {
     expect(() => buildRankingsUrl('https://api.example.com/v1', { limit: 10 })).toThrow();
   });

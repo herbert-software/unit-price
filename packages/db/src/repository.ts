@@ -20,7 +20,7 @@ import {
   type RawProduct,
   type TagSource,
 } from '@unit-price/core';
-import { and, asc, countDistinct, eq, inArray, isNotNull, sql } from 'drizzle-orm';
+import { and, asc, countDistinct, eq, inArray, isNotNull, sql, type SQL } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { z } from 'zod';
 import {
@@ -191,6 +191,17 @@ export interface ListRankingsInput {
    * "beverage", no discriminating power).
    */
   category: string;
+  /**
+   * Optional product-name substring search term. Already trimmed and truncated
+   * to ≤ 64 code points by the API layer (this query only escapes LIKE
+   * specials, never re-truncates). When non-empty it is pushed down as a
+   * `product_raw.title LIKE ? ESCAPE '!'` residual filter ANDed onto the
+   * cohort/rankable/per100ml guards (see `buildRankingsQuery`). Absent / empty
+   * means no title filter — the SQL and query plan are then byte-identical to
+   * the no-`q` board (the `and()` drops the undefined predicate). NEVER applied
+   * to the rankableCount path (tree N == board N stays q-pure).
+   */
+  q?: string;
 }
 
 /**
@@ -455,6 +466,24 @@ function queryOrm(db: Db): BetterSQLite3Database<Record<string, never>> {
  * attribute/brand/product_line edges in the same `product_tag` table never join
  * through.
  */
+/**
+ * Escape a user search term for safe embedding in a SQLite `LIKE ? ESCAPE '!'`
+ * pattern. SQLite `LIKE` has NO default escape character, and drizzle's
+ * `like(col, val)` takes only two args (no escape option) — so escaping must be
+ * done here, in the value, paired with an explicit `ESCAPE '!'` clause at the
+ * call site. `!` is the escape char (chosen over `\` to avoid JS string
+ * double-escaping confusion). The three LIKE specials — the escape char `!`
+ * itself, the wildcards `%` and `_` — are each prefixed with `!` so they match
+ * LITERALLY (the escape char is escaped FIRST so its own substitution doesn't
+ * re-escape the wildcards it introduces). Pure: no IO, only the inner user word
+ * is escaped — the surrounding `%…%` wildcards are added by the caller and must
+ * NOT pass through here (else they would be escaped to literal `%` and match
+ * nothing).
+ */
+export function escapeLikePattern(s: string): string {
+  return s.replace(/[!%_]/g, (ch) => `!${ch}`);
+}
+
 function applyNodeRankingFilter(
   // The select builder before `.from()`. Typed loosely (`any` chain) because the
   // board and count callers pass structurally different selections; each
@@ -463,6 +492,14 @@ function applyNodeRankingFilter(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   query: { from: (table: typeof unitPrice) => any },
   nodeTagId: string,
+  // Optional residual predicate (e.g. the `q` title-LIKE) folded into the ONE
+  // `and(...)` below. MUST be a single optional 3rd arg — never a second
+  // `.where()`: drizzle's `.where()` OVERWRITES (`config.where = where`), which
+  // would wipe the cohort/rankable/per100ml guards. `and()` drops an
+  // `undefined` arg, so passing `undefined` here yields byte-identical SQL to
+  // the pre-`q` query (protects the no-`q` board AND the rankableCount path,
+  // which ALWAYS passes `undefined`).
+  extra?: SQL,
 ) {
   return query
     .from(unitPrice)
@@ -480,6 +517,7 @@ function applyNodeRankingFilter(
         eq(categoryClosure.ancestorTagId, nodeTagId),
         eq(product.rankable, 1),
         isNotNull(unitPrice.per100ml),
+        extra,
       ),
     )
     .$dynamic();
@@ -518,8 +556,18 @@ interface RawRankingRow {
 export function buildRankingsQuery(
   orm: BetterSQLite3Database<Record<string, never>>,
   nodeTagId: string,
-  input: Pick<ListRankingsInput, 'limit' | 'offset'>,
+  input: Pick<ListRankingsInput, 'limit' | 'offset' | 'q'>,
 ) {
+  // `q` (already trimmed + code-point-truncated by the API layer) becomes a
+  // residual `product_raw.title LIKE '%<escaped>%' ESCAPE '!'` predicate. Only
+  // the user word is run through `escapeLikePattern`; the surrounding `%…%`
+  // wildcards are added here and stay wildcards. An absent/empty `q` yields
+  // `undefined` → `and()` drops it → the SQL is byte-identical to the no-`q`
+  // board. `like()` helper is NOT used (no escape option).
+  const titleFilter =
+    input.q != null && input.q !== ''
+      ? sql`${productRaw.title} LIKE ${'%' + escapeLikePattern(input.q) + '%'} ESCAPE '!'`
+      : undefined;
   return applyNodeRankingFilter(
     orm.selectDistinct({
       id: unitPrice.id,
@@ -534,6 +582,7 @@ export function buildRankingsQuery(
       sourceUrl: productRaw.sourceUrl,
     }),
     nodeTagId,
+    titleFilter,
   )
     .orderBy(asc(unitPrice.per100ml), asc(unitPrice.id))
     .limit(input.limit)
@@ -550,13 +599,18 @@ export function buildRankingsQuery(
  * board N". If that 1:1 ever loosens, both sides must switch to the same
  * COUNT(DISTINCT product.id) keying.
  */
-function buildRankableCountQuery(
+export function buildRankableCountQuery(
   orm: BetterSQLite3Database<Record<string, never>>,
   nodeTagId: string,
 ) {
+  // ALWAYS pass `undefined` for the extra predicate: the rankableCount must
+  // stay q-pure so the tree's "N members" can never drift from the no-`q`
+  // board's "N rows" (a `q` filter would shrink the count). `and()` drops
+  // `undefined`, so this SQL is byte-identical regardless of any `q`.
   return applyNodeRankingFilter(
     orm.select({ count: countDistinct(product.id) }),
     nodeTagId,
+    undefined,
   ) as unknown as Promise<Array<{ count: number }>>;
 }
 
@@ -956,6 +1010,8 @@ export function createRepository(db: Db | null | undefined): Repository {
       // SELECT DISTINCT / ORDER BY / LIMIT come from the shared
       // buildRankingsQuery so the EXPLAIN test runs against this exact SQL (no
       // drift). Slicing is in SQL — rows are never pulled into app memory.
+      // `input.q` (already trimmed + truncated upstream) threads through to the
+      // residual title-LIKE; absent/empty → no LIKE, SQL unchanged.
       const rows = await buildRankingsQuery(orm, node.id, input);
 
       return rows.map((row) => ({

@@ -55,10 +55,24 @@ export interface RankingsApi extends RankingsState {
   retryNext: () => void;
 }
 
+/** PURE: build one /rankings page URL from the page cursor + scope params.
+ *  Extracted so the "pagination keeps q (and category)" invariant — every page,
+ *  including page 2 (offset > 0), carries the same filter — is unit-testable
+ *  without the Taro runtime. category/q undefined → buildRankingsUrl omits them
+ *  (identical to the un-scoped 榜单 Tab URL). */
+export function buildPageUrl(
+  base: string,
+  offset: number,
+  category?: string,
+  q?: string,
+): string {
+  return buildRankingsUrl(base, { limit: PAGE_SIZE, offset, category, q });
+}
+
 /** One validated /rankings page fetch. Throws on network failure OR validation
  *  failure (parseRankingsResponse bubbles ZodError) — callers map to error
  *  state. */
-async function fetchPage(offset: number, category?: string): Promise<RankingsItem[]> {
+async function fetchPage(offset: number, category?: string, q?: string): Promise<RankingsItem[]> {
   // Loud, clear failure on an unfilled BASE placeholder (the `[手动验证]` step):
   // surfaces a distinct "BASE 未配置" message via the error state instead of a
   // generic URL-parse error, so the placeholder can never be mistaken for a real
@@ -67,18 +81,21 @@ async function fetchPage(offset: number, category?: string): Promise<RankingsIte
   if (BASE_IS_PLACEHOLDER) {
     throw new Error('BASE 未配置：请在 src/pages/index/config.ts 填入 prod worker 域名（[手动验证]，见任务 5.2）');
   }
-  // category undefined → buildRankingsUrl omits it (identical to the un-scoped
-  // 榜单 Tab URL); a slug scopes the board to that single comparable cohort.
-  const url = buildRankingsUrl(BASE, { limit: PAGE_SIZE, offset, category });
+  const url = buildPageUrl(BASE, offset, category, q);
   const res = await Taro.request({ url, method: 'GET' });
   // parseRankingsResponse is fail-closed: a bad body throws ZodError here.
   return parseRankingsResponse(res.data);
 }
 
 // `category` (optional) scopes every page fetch to one cohort via
-// /rankings?category=<slug>. Stable per mount (a route param) — passing it
-// undefined yields the original un-scoped 榜单 Tab behavior unchanged.
-export function useRankings(category?: string): RankingsApi {
+// /rankings?category=<slug>; `q` (optional) filters by product title via
+// /rankings?q=<term>. Both are stable per mount (route params) — passing them
+// undefined yields the original un-scoped 榜单 Tab behavior unchanged. q MUST flow
+// into ALL THREE fetchPage calls + ALL THREE useCallback deps (same as category):
+// dropping it from runNext would let page 2 use a stale q and mix cohort rows into
+// the search results (latent because board remounts per navigateTo, but guarded
+// here against regression).
+export function useRankings(category?: string, q?: string): RankingsApi {
   const [state, setState] = useState<RankingsState>({
     phase: 'idle',
     items: [],
@@ -99,7 +116,7 @@ export function useRankings(category?: string): RankingsApi {
     inFlightRef.current = true;
     setState((s) => ({ ...s, phase: s.items.length ? s.phase : 'loading' }));
     try {
-      const page = await fetchPage(0, category);
+      const page = await fetchPage(0, category, q);
       offsetRef.current = page.length;
       setState({
         phase: 'ready',
@@ -121,7 +138,7 @@ export function useRankings(category?: string): RankingsApi {
     } finally {
       inFlightRef.current = false;
     }
-  }, [category]);
+  }, [category, q]);
 
   const loadFirst = useCallback(() => {
     setState((s) => {
@@ -142,7 +159,7 @@ export function useRankings(category?: string): RankingsApi {
     if (inFlightRef.current) return;
     inFlightRef.current = true;
     try {
-      const page = await fetchPage(0, category);
+      const page = await fetchPage(0, category, q);
       offsetRef.current = page.length;
       setState({
         phase: 'ready',
@@ -172,14 +189,14 @@ export function useRankings(category?: string): RankingsApi {
     } finally {
       inFlightRef.current = false;
     }
-  }, [category]);
+  }, [category, q]);
 
   const runNext = useCallback(async () => {
     if (inFlightRef.current) return;
     inFlightRef.current = true;
     setState((s) => ({ ...s, pageLoading: true, pageError: false }));
     try {
-      const page = await fetchPage(offsetRef.current, category);
+      const page = await fetchPage(offsetRef.current, category, q);
       if (page.length === 0) {
         // Empty page → reached the end, stop requesting.
         setState((s) => ({ ...s, pageLoading: false, reachedEnd: true }));
@@ -199,7 +216,7 @@ export function useRankings(category?: string): RankingsApi {
     } finally {
       inFlightRef.current = false;
     }
-  }, [category]);
+  }, [category, q]);
 
   const loadNext = useCallback(() => {
     setState((s) => {
