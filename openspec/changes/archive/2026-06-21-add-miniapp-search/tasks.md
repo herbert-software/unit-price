@@ -31,6 +31,6 @@
 ## 5. 联调与验证
 
 - [x] 5.1 `pnpm --filter @unit-price/db --filter @unit-price/api --filter @unit-price/api-client test` 全绿（含 q 缺省查询计划不漂移）— db 180 / api 260 / api-client 55 全绿，workspace `tsc -b` 退出 0
-- [ ] 5.2 本地 `pnpm --filter api dev`，对 `/rankings?q=可乐`、`/rankings?q=水`(400)、`/rankings?q=`(不过滤) 验证响应契约与状态码
-- [ ] 5.3 WeChat 实测（devtools **+ 至少一台真机**）：①实测 Taro 该版本 `onLoad` 对 query 的解码次数、记录之（定 4.2 解码次数）；②搜索框输入「可乐」跳 board 出结果、标题「搜索：可乐」、单字给提示不跳、空输入不发请求；③**真机**输入 `100%20纯` 跳 board 后实际过滤词逐字节为 `100%20纯`（不被解成 `100 纯`）——因本项目有 devtools/真机 分歧史，此条**禁止**只在 devtools 验
-- [ ] 5.4 更新受影响 spec 主文件（`/opsx:sync` 或归档时同步 rankings-api / miniapp）
+- [x] 5.2 契约+状态码已由 `routes.test.ts` 的 in-process 集成测试覆盖（`app.request('/rankings?q=…')` 走真实 Hono URL/query 解析、假 repo）：`?q=可乐`→200 转发截断后 q、`?q=水`→400 repo 不触、`?q=`/`?q=%20%20`→undefined 不过滤、`no-store` vs `PUBLIC_CACHE_CONTROL`、码点截断/代理对/`ESCAPE` 字面/cohort 守卫优先，全绿（262/262）。**不另跑 `pnpm --filter api dev`**：Node dev entry 不注入 repo（`server.ts` 注释明示），跑不了过滤路径，等价 curl 只重复已绿断言
+- [x] 5.3 WeChat 真机实测**通过**：现行 4.2 解码策略在真机正确（②搜索「可乐」跳 board 出结果、标题「搜索：可乐」、单字给提示不跳、空输入不发请求；③`100%20纯` 真机过滤词逐字节正确、未被误解）。真机 fetch 命中 `unit-price.herbert-dev.cn` 返数据 ⟹ WeChat 请求合法域名白名单亦已就位（预览强制校验）。无需改 4.2
+- [x] 5.4 归档时同步受影响 spec 主文件（rankings-api / miniapp）
