@@ -1,4 +1,4 @@
-/* SearchEntry — placeholder bar (P0 ".search"). px→rpx ~1:2. The icon inherits
+/* SearchEntry — real input bar (P4 ".search"). px→rpx ~1:2. The icon inherits
    color: var(--muted) so its currentColor strokes match the placeholder text;
    no color literals. */
 
@@ -46,6 +46,14 @@
   transform: rotate(45deg);
 }
 
+/* The input fills the bar; its own text is the normal (non-muted) ink color. */
+.searchentry__input {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-sm);
+}
+
+/* placeholderClass target — muted, matching the magnifier glyph. */
 .searchentry__placeholder {
   font-size: var(--fs-sm);
   color: var(--muted);

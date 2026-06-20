@@ -10,6 +10,7 @@ export interface RankingsParams {
   limit?: number;
   offset?: number;
   category?: string;
+  q?: string;
 }
 
 /**
@@ -76,6 +77,9 @@ export function buildRankingsUrl(base: string, params: RankingsParams = {}): str
   if (params.offset !== undefined) pairs.push(`offset=${encodeURIComponent(String(params.offset))}`);
   if (params.category !== undefined) {
     pairs.push(`category=${encodeURIComponent(String(params.category))}`);
+  }
+  if (params.q !== undefined) {
+    pairs.push(`q=${encodeURIComponent(String(params.q))}`);
   }
 
   return pairs.length === 0 ? url : `${url}?${pairs.join('&')}`;

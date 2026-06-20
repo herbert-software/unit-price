@@ -280,6 +280,28 @@ export const RankingsQuerySchema = z.object({
     .optional()
     .transform((n) => n ?? 0),
   category: z.enum(CATEGORY_SLUGS).default('soft-drink'),
+  // `q` (title substring search) is a PURE-ADDITIVE concern — the schema is
+  // `z.object` (NOT `.strict`), so absent `q` leaves the no-`q` board unchanged.
+  // Pipeline ORDER is load-bearing (see design.md D2.1):
+  //   1. trim          — ECMAScript trim() strips half- AND full-width (　) space.
+  //   2. ''→undefined  — empty / whitespace-only means NO search intent → undefined
+  //                      (NOT filtered). This MUST run BEFORE the refine, else the
+  //                      refine would 400 on an empty `?q=`.
+  //   3. refine ≥ 2    — only the PRESENT branch is length-checked; trim→1 codepoint
+  //                      is "searched but too wide" → 400 invalid-request (single CJK
+  //                      char like 水/茶/奶 over-matches into near-full-table).
+  //   4. truncate ≤ 64 — by CODEPOINT (`[...s]`), never UTF-16 `.length`: surrogate
+  //                      pairs (emoji / rare CJK 𠮷) count as 1 and `.slice` never
+  //                      splits a pair (no lone surrogate injected into LIKE).
+  //   5. optional      — last, so absent stays absent.
+  // ALL length math is by codepoint (`[...s]`), never `.length`.
+  q: z
+    .string()
+    .transform((s) => s.trim())
+    .transform((s) => (s === '' ? undefined : s))
+    .refine((s) => s === undefined || [...s].length >= 2, { message: 'q too short' })
+    .transform((s) => (s === undefined ? undefined : [...s].slice(0, 64).join('')))
+    .optional(),
 });
 
 export type RankingsQuery = z.infer<typeof RankingsQuerySchema>;
@@ -501,7 +523,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
         400,
       );
     }
-    const { limit, offset, category } = parsedQuery.data;
+    const { limit, offset, category, q } = parsedQuery.data;
 
     // ── Cohort guard (P3.5): the board is open ONLY for a node that resolves a
     //    non-null comparable_unit (a single rankable cohort — soft-drink / its
@@ -540,7 +562,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
     //    retry); per100ml/formula/confidence/warnings are stored values.
     let rows: Awaited<ReturnType<Repository['listRankings']>>;
     try {
-      rows = await repo.listRankings({ limit, offset, category });
+      rows = await repo.listRankings({ limit, offset, category, q });
     } catch {
       return c.json({ error: 'persistence-error', message: 'failed to read rankings' }, 500);
     }
@@ -568,9 +590,18 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
     if (!validated.success) {
       return c.json({ error: 'internal', message: 'response failed validation' }, 500);
     }
-    // Edge-cacheable (Aliyun CDN POP + Cloudflare) — only this 200 path; the
-    // 400/500 above carry no Cache-Control and are never cached.
-    c.header('Cache-Control', PUBLIC_CACHE_CONTROL);
+    // ── Cache verdict keys off the POST-PARSE `q`, NOT raw URL key presence:
+    //    a real search (`q` resolved to a string, codepoint ≥ 2) gets an EXPLICIT
+    //    `no-store` — search is long-tail, each `q` is its own near-never-reused
+    //    CDN key, and the CDN partitions on the RAW un-truncated URL (out of sync
+    //    with the server's 64-codepoint truncation), so caching it just fills the
+    //    CDN with cold misses. Merely OMITTING `public` is NOT enough — Aliyun CDN
+    //    self-caches at a default TTL, so we must actively `no-store`. When `q`
+    //    parsed to `undefined` (absent / `?q=` / `?q=%20%20`, i.e. no filter) the
+    //    body equals the no-`q` cohort board, so it still rides the public edge
+    //    cache. (The 400/500 paths above carry no Cache-Control and are never
+    //    cached.)
+    c.header('Cache-Control', q !== undefined ? 'no-store' : PUBLIC_CACHE_CONTROL);
     return c.json(validated.data, 200);
   });
 

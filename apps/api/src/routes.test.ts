@@ -836,6 +836,165 @@ describe('GET /rankings — empty library -> 200 + []', () => {
   });
 });
 
+// ── GET /rankings — q (title substring search) validation + cache (rankings-api)
+// The route validates `q` via the RankingsQuerySchema pipeline (trim → ''→undefined
+// → refine ≥2 codepoints → truncate ≤64 codepoints → optional) and forwards the
+// validated value to listRankings. The db layer owns the actual LIKE/ESCAPE
+// filtering (covered in @unit-price/db); here we assert what the ROUTE forwards and
+// how it sets Cache-Control. ALL length math is by CODEPOINT (`[...s]`), never `.length`.
+describe('GET /rankings — q search: validation, forwarding, codepoint length', () => {
+  it('?q=可乐 forwards the trimmed/truncated q to listRankings (200)', async () => {
+    let seen: ListRankingsInput | null = null;
+    const { app } = rankingsApp(SNAPSHOT, { onCall: (i) => (seen = i) });
+    const { res } = await getRankings(app, `?q=${encodeURIComponent('可乐')}`);
+    expect(res.status).toBe(200);
+    expect(seen!.q).toBe('可乐');
+  });
+
+  it('?q=水 (single codepoint) -> 400 invalid-request, repo never queried', async () => {
+    const { app, listRankings } = rankingsApp(SNAPSHOT);
+    const { res, json } = await getRankings(app, `?q=${encodeURIComponent('水')}`);
+    expect(res.status).toBe(400);
+    expect(json.error).toBe('invalid-request');
+    expect(listRankings).not.toHaveBeenCalled();
+  });
+
+  it('duplicate ?q=可乐&q=雪碧 forwards the FIRST value 可乐 (Hono c.req.query semantics)', async () => {
+    let seen: ListRankingsInput | null = null;
+    const { app } = rankingsApp(SNAPSHOT, { onCall: (i) => (seen = i) });
+    const { res } = await getRankings(
+      app,
+      `?q=${encodeURIComponent('可乐')}&q=${encodeURIComponent('雪碧')}`,
+    );
+    expect(res.status).toBe(200);
+    // c.req.query() takes the first value; the second (雪碧) is ignored.
+    expect(seen!.q).toBe('可乐');
+  });
+
+  it('duplicate ?q=水&q=可乐 runs the length gate on the FIRST value 水 -> 400, repo never queried', async () => {
+    const { app, listRankings } = rankingsApp(SNAPSHOT);
+    const { res, json } = await getRankings(
+      app,
+      `?q=${encodeURIComponent('水')}&q=${encodeURIComponent('可乐')}`,
+    );
+    // First value 水 is 1 codepoint → fails the ≥2 gate, even though a valid
+    // second value 可乐 follows (which c.req.query ignores).
+    expect(res.status).toBe(400);
+    expect(json.error).toBe('invalid-request');
+    expect(listRankings).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['empty q', '?q='],
+    ['half-width whitespace q', `?q=${encodeURIComponent('  ')}`],
+    ['full-width whitespace q', `?q=${encodeURIComponent('　')}`],
+  ])('%s -> not filtered (q === undefined forwarded), 200', async (_name, query) => {
+    let seen: ListRankingsInput | null = null;
+    const { app } = rankingsApp(SNAPSHOT, { onCall: (i) => (seen = i) });
+    const { res } = await getRankings(app, query);
+    expect(res.status).toBe(200);
+    // trim → '' → undefined BEFORE the refine, so empty/whitespace never 400s and
+    // never filters (the request is the plain cohort board).
+    expect(seen!.q).toBeUndefined();
+  });
+
+  it('?q=<70 codepoints> truncates to 64 codepoints', async () => {
+    let seen: ListRankingsInput | null = null;
+    const { app } = rankingsApp(SNAPSHOT, { onCall: (i) => (seen = i) });
+    const long = 'a'.repeat(70);
+    const { res } = await getRankings(app, `?q=${encodeURIComponent(long)}`);
+    expect(res.status).toBe(200);
+    expect([...seen!.q!]).toHaveLength(64);
+    expect(seen!.q).toBe('a'.repeat(64));
+  });
+
+  it('surrogate-pair q (emoji / 𠮷) is measured by codepoint, never split at the 64 boundary', async () => {
+    let seen: ListRankingsInput | null = null;
+    const { app } = rankingsApp(SNAPSHOT, { onCall: (i) => (seen = i) });
+    // 𠮷 is one codepoint but two UTF-16 units; 70 of them = 70 codepoints (140
+    // UTF-16 units). By codepoint we truncate to 64 whole chars — never a lone
+    // surrogate. (UTF-16 `.length` would wrongly see 140 and slice at unit 64,
+    // splitting a pair.)
+    const surrogate = '𠮷'.repeat(70);
+    const { res } = await getRankings(app, `?q=${encodeURIComponent(surrogate)}`);
+    expect(res.status).toBe(200);
+    expect([...seen!.q!]).toHaveLength(64); // 64 codepoints, not 64 UTF-16 units
+    expect(seen!.q).toBe('𠮷'.repeat(64));
+    // No lone surrogate (split pair) survived: every codepoint is the full 𠮷.
+    expect([...seen!.q!].every((ch) => ch === '𠮷')).toBe(true);
+  });
+
+  it('a 2-codepoint emoji q passes the ≥2 lower bound (not under-counted as 1)', async () => {
+    let seen: ListRankingsInput | null = null;
+    const { app } = rankingsApp(SNAPSHOT, { onCall: (i) => (seen = i) });
+    // Two emoji = 2 codepoints (4 UTF-16 units). Codepoint length 2 ≥ 2 → admitted.
+    const twoEmoji = '😀😀';
+    const { res } = await getRankings(app, `?q=${encodeURIComponent(twoEmoji)}`);
+    expect(res.status).toBe(200);
+    expect(seen!.q).toBe(twoEmoji);
+  });
+
+  it.each([
+    ['literal percent', '100%水'],
+    ['literal underscore', 'a_b'],
+    ['literal escape char', 'a!b'],
+    ['literal plus (encodeURIComponent → %2B → +)', '100+200'],
+  ])(
+    '%s is forwarded VERBATIM (route does not escape; db ESCAPE owns LIKE literalization)',
+    async (_name, q) => {
+      let seen: ListRankingsInput | null = null;
+      const { app } = rankingsApp(SNAPSHOT, { onCall: (i) => (seen = i) });
+      const { res } = await getRankings(app, `?q=${encodeURIComponent(q)}`);
+      expect(res.status).toBe(200);
+      // The route forwards the literal user text; LIKE special chars (%, _, the !
+      // escape char) are escaped in the db layer's `ESCAPE '!'` pattern, and `+`
+      // survives as a literal because encode/decodeURIComponent map + ↔ %2B (NOT
+      // form `+`→space). So `100+200` reaches the repo as `100+200`.
+      expect(seen!.q).toBe(q);
+    },
+  );
+
+  it('?q=可乐&category=alcohol -> 400 (cohort guard fires BEFORE the q filter)', async () => {
+    const { app, listRankings } = rankingsApp(SNAPSHOT);
+    const { res, json } = await getRankings(
+      app,
+      `?q=${encodeURIComponent('可乐')}&category=alcohol`,
+    );
+    expect(res.status).toBe(400);
+    expect(json.error).toBe('invalid-request');
+    // The cross-cohort guard rejects before the repo is ever queried, regardless
+    // of a present q.
+    expect(listRankings).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /rankings — q search: cache verdict keys off the POST-PARSE q', () => {
+  it('?q=可乐 (real filter) -> Cache-Control: no-store (not just omitting public)', async () => {
+    const { app } = rankingsApp(SNAPSHOT);
+    const { res } = await getRankings(app, `?q=${encodeURIComponent('可乐')}`);
+    expect(res.status).toBe(200);
+    const cc = res.headers.get('cache-control') ?? '';
+    expect(cc).toBe('no-store');
+    expect(cc).not.toMatch(/public/);
+  });
+
+  it.each([
+    ['?q=%20%20 (whitespace → undefined)', `?q=${encodeURIComponent('  ')}`],
+    ['no q at all', ''],
+  ])('%s -> public edge cache (same as no-q board)', async (_name, query) => {
+    const { app } = rankingsApp(SNAPSHOT);
+    const { res } = await getRankings(app, query);
+    expect(res.status).toBe(200);
+    const cc = res.headers.get('cache-control') ?? '';
+    // q parsed to undefined → body equals the cohort board → rides the public
+    // edge cache. The verdict keys off the POST-PARSE q (undefined), NOT the raw
+    // URL having a `q` key.
+    expect(cc).toMatch(/public/);
+    expect(cc).toMatch(/max-age=\d+/);
+    expect(cc).not.toBe('no-store');
+  });
+});
+
 describe('GET /rankings — same per100ml stable pagination (one snapshot)', () => {
   it('two pages (offset 0 / offset N) cover the same-value rows without overlap or gaps', async () => {
     // limit=2 splits the 5-row snapshot into [0,2) / [2,4) / [4,5). The two

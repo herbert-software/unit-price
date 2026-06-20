@@ -1,11 +1,12 @@
-// Category-scoped rankings board (分类榜) — the per-cohort, per100ml-ascending
-// list reached by tapping a rankable node in the 分类 Tab. Non-tab page (has a
-// back button); the nav title is the tapped category's Chinese name.
+// Rankings board list — the per100ml-ascending list reused by TWO entries:
+//   - 分类下钻: GET /rankings?category=<slug>, title = category's Chinese name.
+//   - 搜索:     GET /rankings?q=<term>,       title = `搜索：<decoded q>`.
+// Non-tab page (has a back button).
 //
-// Reuses the 榜单 Tab's tested data layer VERBATIM: useRankings(category) threads
-// the category slug into buildRankingsUrl → GET /rankings?category=<slug>. Same
-// three-state render + pagination + page-error semantics; only the header chrome
-// (brand / search / scope / ads) is dropped — a board is just the list.
+// Reuses the 榜单 Tab's tested data layer VERBATIM: useRankings(category, q) threads
+// the params into buildRankingsUrl → GET /rankings?category=…&q=…. Same three-state
+// render + pagination + page-error semantics; only the header chrome (brand / search
+// / scope / ads) is dropped — a board is just the list.
 import { View } from '@tarojs/components';
 import Taro, { useRouter, useLoad, usePullDownRefresh, useReachBottom } from '@tarojs/taro';
 import { useRankings } from '../index/useRankings';
@@ -20,12 +21,15 @@ import '../index/index.css';
 export default function Board() {
   const router = useRouter();
   // `category` is the cohort slug (undefined for a missing/blank hand-typed route →
-  // un-scoped list); `name` is the title, decoded crash-safely. See readBoardParams.
-  const { category, name } = readBoardParams(router.params);
+  // un-scoped list); `q` is the decoded search term (undefined for non-search); `name`
+  // is the title already derived by precedence (decoded non-empty q → `搜索：<q>`,
+  // else category name, else `分类榜`). See readBoardParams.
+  const { category, q, name } = readBoardParams(router.params);
 
-  const r = useRankings(category);
+  const r = useRankings(category, q);
 
   useLoad(() => {
+    // `name` is already the decoded-q-or-category title (not the encoded q).
     void Taro.setNavigationBarTitle({ title: name });
     r.loadFirst();
   });
