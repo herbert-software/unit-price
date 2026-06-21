@@ -11,11 +11,21 @@ import {
   ParsedSpecSchema,
   UnitPriceSchema,
   WarningsSchema,
+  calculate,
+  meetsComputeRequiredSet,
   type ComparableUnit,
+  type ParsedSpec,
   type RawProduct,
 } from '@unit-price/core';
-import { RankingsResponseSchema, CategoryTreeResponseSchema } from '@unit-price/api-client';
-import { CATEGORY_NODES, type Db, type Repository } from '@unit-price/db';
+import {
+  RankingsResponseSchema,
+  CategoryTreeResponseSchema,
+  ComputeRequestSchema,
+  ComputeResultSchema,
+  type ComputeRequest,
+  type RankingsItem,
+} from '@unit-price/api-client';
+import { CATEGORY_NODES, type Db, type RankingRow, type Repository } from '@unit-price/db';
 import { orchestrate } from './orchestrate.js';
 import type { SpecParserLLM } from './llm.js';
 import type { AppEnv, Bindings } from './bindings.js';
@@ -141,6 +151,25 @@ export const BG_POOL = 5;
  * default, so /rankings?category=… variants cache separately.)
  */
 export const PUBLIC_CACHE_CONTROL = 'public, max-age=300';
+
+/**
+ * Neighbors returned each side of the user's value by POST /compute (up to N
+ * cheaper + up to N pricier). Pure display parameter (decision D6) — tune here;
+ * not part of the response contract's核心.
+ */
+export const COMPUTE_NEIGHBORS_N = 3;
+
+/**
+ * Upper bound on cohort rankable rows POST /compute pulls to position the user.
+ * Positioning needs the FULL ascending cohort board (count rows below the user
+ * value + pick the boundary neighbors), so the端点 reads the whole cohort via the
+ * SAME `repo.listRankings` cohort/rankable/per100ml query as /rankings (decision
+ * D6 — "定位" and "榜单" share one population), capped to keep one bounded read
+ * (v1 cohorts are ~hundreds). The slice is in SQL; rows past this cap (a far
+ * larger cohort than any v1 leaf) would silently under-count — raise this if a
+ * cohort ever approaches it.
+ */
+export const COMPUTE_COHORT_FETCH_MAX = 5000;
 
 /**
  * Batch ingest request: an envelope of 1..MAX_BATCH single-item contributions.
@@ -488,6 +517,93 @@ async function hmacKeyId(key: string, secret: string): Promise<string> {
   return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 16);
 }
 
+/**
+ * Map the cohort's static comparable-unit (`per_100ml`/`per_100g`/`per_100sheet`)
+ * to the core `UnitPrice` axis field its `calculate` populates. `per_100ml` ↔
+ * `per100ml`, `per_100g` ↔ `per100g`. `per_100sheet` (a v2 placeholder, not a
+ * calculable volume/weight axis) and any unmapped value return null → the cohort
+ * is not compute-positionable on either axis, so the route 400s as incomparable.
+ */
+function cohortAxisField(unit: ComparableUnit): 'per100ml' | 'per100g' | null {
+  if (unit === 'per_100ml') return 'per100ml';
+  if (unit === 'per_100g') return 'per100g';
+  return null;
+}
+
+/** The response `axis` literal for the cohort's per100 field. */
+function axisLabel(field: 'per100ml' | 'per100g'): 'per_100ml' | 'per_100g' {
+  return field === 'per100ml' ? 'per_100ml' : 'per_100g';
+}
+
+/**
+ * Project a stored RankingRow → the shared `RankingsItem` shape (DROP `id`, ADD
+ * the row's board `rank`). Identical projection to /rankings so a positioned
+ * neighbor row renders exactly like a board row (decision D6). `rank` is the
+ * row's 1-based position in the ascending cohort board (its array index + 1).
+ */
+function projectNeighbor(row: RankingRow, boardRank: number): RankingsItem {
+  return {
+    rank: boardRank,
+    title: row.title,
+    priceCents: row.priceCents,
+    per100ml: row.per100ml,
+    formula: row.formula,
+    confidence: row.confidence,
+    warnings: row.warnings,
+    store: row.store,
+    storeSku: row.storeSku,
+    sourceUrl: row.sourceUrl,
+  };
+}
+
+/**
+ * Deterministic in-cohort positioning of `userValue` against the FULL ascending
+ * cohort board `rows` (already sorted by per100ml ASC — the /rankings order).
+ * Pure (no IO):
+ *  - `rank` = (# rows strictly cheaper than the user) + 1 (1-based; the user
+ *    slots AFTER every strictly-cheaper row, ties counted as not-cheaper).
+ *  - `total` = the cohort's rankable row count (`rows.length`).
+ *  - `percentile` = the share of the cohort the user is strictly cheaper than,
+ *    `(# rows pricier) / total * 100`; `total = 0 → 0` (no cohort to beat — the
+ *    deterministic empty-cohort convention, never NaN).
+ *  - `neighbors` = up to N rows each side of the user's slot (the N cheapest-but-
+ *    still-pricier-than below it are the closest cheaper ones; the N just-pricier
+ *    above), board-projected with their board ranks. MAY be empty / one-sided at
+ *    a boundary (a valid 200, never a 404).
+ */
+function positionInCohort(
+  rows: RankingRow[],
+  userValue: number,
+): { rank: number; total: number; percentile: number; neighbors: RankingsItem[] } {
+  const total = rows.length;
+  // Rows are ASC by per100ml. cheaperCount = strictly-cheaper rows; the user's
+  // insertion slot is right after them (ties are NOT cheaper, so the user ranks
+  // after equal-priced rows too — stable with the board's tiebreak intent).
+  let cheaperCount = 0;
+  while (cheaperCount < total && rows[cheaperCount]!.per100ml < userValue) {
+    cheaperCount += 1;
+  }
+  const rank = cheaperCount + 1;
+  // percentile = "你比多少同类便宜" = share of cohort rows STRICTLY pricier than
+  // the user (the rows the user genuinely beats). `total = 0 → 0` (no cohort to
+  // beat — deterministic empty-cohort convention, never NaN).
+  let strictlyPricier = 0;
+  for (let i = cheaperCount; i < total; i++) {
+    if (rows[i]!.per100ml > userValue) strictlyPricier += 1;
+  }
+  const percentile = total === 0 ? 0 : (strictlyPricier / total) * 100;
+  // Neighbors: the N closest cheaper rows (just below the slot) and the N closest
+  // pricier-or-equal rows (at/above the slot), each board-projected with rank =
+  // array index + 1.
+  const below = rows
+    .slice(Math.max(0, cheaperCount - COMPUTE_NEIGHBORS_N), cheaperCount)
+    .map((r, i) => projectNeighbor(r, Math.max(0, cheaperCount - COMPUTE_NEIGHBORS_N) + i + 1));
+  const above = rows
+    .slice(cheaperCount, cheaperCount + COMPUTE_NEIGHBORS_N)
+    .map((r, i) => projectNeighbor(r, cheaperCount + i + 1));
+  return { rank, total, percentile, neighbors: [...below, ...above] };
+}
+
 export function createApp(deps: AppDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
 
@@ -639,6 +755,188 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
     }
     // Edge-cacheable like /rankings; the category tree changes even less often.
     c.header('Cache-Control', PUBLIC_CACHE_CONTROL);
+    return c.json(validated.data, 200);
+  });
+
+  // POST /compute — stateless on-demand 比价: deterministic per-unit price for a
+  // STRUCTURED input (no dirty title → NO AI; this is tier3 only) + in-cohort
+  // positioning. Like /rankings and /categories it is EXEMPT from the governance
+  // chain (no `app.use('/compute', …)`): it takes no API key and records no
+  // usage. STRICTLY no persistence — it reuses core's `calculate` (zero new
+  // calculation) and the SAME `repo.listRankings` cohort/rankable/per100ml query
+  // for "定位" as /rankings uses for "榜单" (one population, decision D6), and
+  // NEVER calls a write method. Error codes mirror the other endpoints
+  // (invalid-request 400, persistence-error 500, internal 500). Every response
+  // carries `Cache-Control: no-store` (each input is unique — caching is pure
+  // CDN-pollution, decision D6).
+  app.post('/compute', async (c) => {
+    // ── Validate body with the SHARED api-client schema (the trust-boundary
+    //    authoritative validation, decision D7): non-JSON / schema fail (incl.
+    //    totalPrice ≤ 0, a zero/negative measurement, empty category) → 400.
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: 'invalid-request', message: 'request body must be valid JSON' }, 400);
+    }
+    const parsedReq = ComputeRequestSchema.safeParse(body);
+    if (!parsedReq.success) {
+      return c.json(
+        {
+          error: 'invalid-request',
+          message: 'request body failed validation',
+          issues: parsedReq.error.issues.map((i) => ({ path: i.path, message: i.message })),
+        },
+        400,
+      );
+    }
+    const req: ComputeRequest = parsedReq.data;
+
+    // ── Map ComputeRequest → core ParsedSpec. The slim `{value,unit}` form maps
+    //    1:1 onto core's Measurement (`ml|L|g|kg` are identical to core's Unit);
+    //    `multipliers:[1]` (no extra-layer packs in the structured form),
+    //    `confidence:1` (structured input has NO parse uncertainty). `category`
+    //    rides through verbatim (its cohort legality is the guard's concern below).
+    const spec: ParsedSpec = {
+      unitSize: req.unitSize ?? null,
+      quantity: req.quantity ?? null,
+      multipliers: [1],
+      totalAmount: req.totalAmount ?? null,
+      category: req.category,
+      confidence: 1,
+    };
+
+    // ── Input-set sufficiency FIRST (compute-required set): have `totalAmount`
+    //    OR `unitSize`+`quantity`, plus price > 0. Insufficient → 400 naming the
+    //    missing class (NOT a silent per100ml=null 200, decision D5).
+    if (!meetsComputeRequiredSet(spec, req.totalPrice)) {
+      return c.json(
+        {
+          error: 'invalid-request',
+          message:
+            '输入集不足：请补充「总量」或「单件容量 + 数量」之一（再加总价）才能计算单价',
+        },
+        400,
+      );
+    }
+
+    // ── tier3 deterministic calculation (core, ZERO new calc logic). An
+    //    uncomputable terminal state (price 非正 / 无可识别单位轴 / 规格不自洽 →
+    //    both axes null + warning) is NEVER a silent 200: map it to 400 carrying
+    //    core's warning (decision D5). A successful CalcResult has exactly ONE
+    //    per100 axis non-null.
+    const calc = calculate(spec, req.totalPrice);
+    if (calc.unitPrice.formula === null) {
+      return c.json(
+        {
+          error: 'invalid-request',
+          message: calc.warnings[0] ?? '无法计算单价',
+        },
+        400,
+      );
+    }
+    const inputAxisField: 'per100ml' | 'per100g' =
+      calc.unitPrice.per100ml !== null ? 'per100ml' : 'per100g';
+    const userValue = calc.unitPrice[inputAxisField] as number;
+
+    // ── Known-slug gate (BEFORE the cohort resolver): `category` MUST be a member
+    //    of the SAME compile-time seed slug set `/rankings` validates against
+    //    (`CATEGORY_SLUGS`). A non-member (typo / unknown) → 400 未知品类 — a
+    //    DISTINCT message from the cross-cohort one below, so a typo is not
+    //    misdiagnosed as 「跨多个比价口径」. (`/rankings` gets this gate for free via
+    //    its `z.enum(CATEGORY_SLUGS)` query schema; /compute's category arrives in
+    //    the body as a plain `z.string().min(1)`, so the gate is explicit here.)
+    if (!CATEGORY_SLUGS.includes(req.category)) {
+      return c.json({ error: 'invalid-request', message: '未知品类' }, 400);
+    }
+
+    // ── Cohort comparability guard (decision D4), reusing the SAME static
+    //    resolver as /rankings. null (a cross-cohort node: `beverage`/`alcohol`)
+    //    → 400 (cannot 比价 directly). Non-null but NOT mapping to the input axis
+    //    (input g into a per_100ml cohort) → 400 不可比, naming the cohort's 比价
+    //    axis. The guard runs BEFORE any repo read.
+    const cohortUnit = resolveComparableUnitStatic(req.category);
+    if (cohortUnit === null) {
+      return c.json(
+        {
+          error: 'invalid-request',
+          message:
+            '该品类跨多个比价口径，无法直接比价；请选择具体子品类',
+        },
+        400,
+      );
+    }
+    const cohortAxis = cohortAxisField(cohortUnit);
+    // per_100g cohorts are unservable this period: the positioning read reuses the
+    // per100ml-only /rankings query, so a per_100g cohort would mis-position a
+    // g-value against an ml board (a confident garbage rank). Reject explicitly
+    // until the 重量轴 backfill extends listRankings/RankingsItem to a per100g board.
+    if (cohortAxis === 'per100g') {
+      return c.json(
+        { error: 'invalid-request', message: '本期暂不支持按重量（每100g）比价' },
+        400,
+      );
+    }
+    // The only servable axis now is per_100ml. Reject a cross-axis input (g into
+    // the ml cohort) or an unservable non-volume cohort (e.g. per_100sheet → null).
+    // No raw comparable-unit slug ever reaches the user message.
+    if (cohortAxis === null || cohortAxis !== inputAxisField) {
+      return c.json(
+        {
+          error: 'invalid-request',
+          message:
+            cohortAxis === null
+              ? '该品类暂不支持比价'
+              : '输入单位与该品类的比价口径不一致：该品类按每 100ml 比价，请使用 ml/L',
+        },
+        400,
+      );
+    }
+
+    // ── Resolve the repository for the in-cohort positioning read (shared
+    //    helper; null/throw → 500 persistence-error). Read-only — no write path
+    //    is reachable from here.
+    const resolved = resolveRepo(c, deps);
+    if (!resolved.ok) return resolved.response;
+    const repo = resolved.value;
+
+    // ── Read the FULL ascending cohort board via the SAME cohort/rankable/
+    //    per100ml query /rankings uses (one population, decision D6). A throw →
+    //    500 persistence-error. An empty / unseeded cohort returns [] → a valid
+    //    200 with empty neighbors (never a 404).
+    let rows: RankingRow[];
+    try {
+      rows = await repo.listRankings({
+        limit: COMPUTE_COHORT_FETCH_MAX,
+        offset: 0,
+        category: req.category,
+      });
+    } catch {
+      return c.json({ error: 'persistence-error', message: 'failed to read cohort for positioning' }, 500);
+    }
+
+    // ── Deterministic positioning (pure): rank / total / percentile + boundary
+    //    neighbors. `rows` is already ASC by per100ml (the /rankings order).
+    const { rank, total, percentile, neighbors } = positionInCohort(rows, userValue);
+
+    // ── Assemble + validate the response (contract enforcement, mirrors the
+    //    other endpoints). EXACTLY one per100 axis is non-null (the computed one).
+    const validated = ComputeResultSchema.safeParse({
+      per100ml: calc.unitPrice.per100ml,
+      per100g: calc.unitPrice.per100g,
+      formula: calc.unitPrice.formula,
+      axis: axisLabel(inputAxisField),
+      rank,
+      total,
+      percentile,
+      neighbors,
+    });
+    if (!validated.success) {
+      return c.json({ error: 'internal', message: 'response failed validation' }, 500);
+    }
+    // Each input is unique → never edge-cache (decision D6). The 400/500 paths
+    // above carry NO Cache-Control (never cached).
+    c.header('Cache-Control', 'no-store');
     return c.json(validated.data, 200);
   });
 

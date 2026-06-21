@@ -14,6 +14,7 @@ import { readBoardParams } from './params';
 import RankingRow from '../../components/RankingRow';
 import ListFooter from '../../components/ListFooter';
 import { ListLoading, ListEmpty, FirstScreenError } from '../../components/ListStates';
+import ComputeCta from '../../components/ComputeCta';
 
 // Reuse the 榜单 Tab's .screen/.list rules — same list chrome, no second copy.
 import '../index/index.css';
@@ -60,10 +61,12 @@ export default function Board() {
     );
   }
 
+  // Empty: in SEARCH mode (q set) → the 比价 CTA (highest-intent "not found"
+  // moment, primary entry to /compute); in category-drill mode → plain empty.
   if (r.phase === 'ready' && r.items.length === 0) {
     return (
       <View className="screen">
-        <ListEmpty />
+        {q ? <ComputeCta term={q} /> : <ListEmpty />}
       </View>
     );
   }

@@ -1,0 +1,390 @@
+/* 比价表单页 — P0 设计语言延伸。颜色仅 var(--…)（token 在 app.css），阴影走 var(--shadow）。
+   px→rpx ~1:2。面向在店快速比价:大点击区、最少字段、二选一 toggle、单位随品类约束。 */
+
+.cscreen {
+  min-height: 100vh;
+  background: var(--paper);
+  padding: var(--sp-4) var(--sp-4) 200rpx; /* 底部留白避开 sticky .cbar */
+  box-sizing: border-box;
+}
+
+/* — 引子 — */
+.cintro {
+  padding: var(--sp-2) var(--sp-1) var(--sp-4);
+}
+.cintro__title {
+  display: block;
+  font-size: var(--fs-2xl);
+  font-weight: var(--fw-black);
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+.cintro__sub {
+  display: block;
+  margin-top: var(--sp-1);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+/* — 表单卡 — */
+.cform {
+  background: var(--paper-card);
+  border-radius: var(--r-card);
+  box-shadow: var(--shadow);
+  padding: var(--sp-2) var(--sp-4) var(--sp-4);
+}
+
+.cfield {
+  display: flex;
+  align-items: center;
+  min-height: 96rpx;
+  border-bottom: 3rpx solid var(--line);
+}
+.cfield:last-child {
+  border-bottom: none;
+}
+.cfield__label {
+  flex-shrink: 0;
+  width: 150rpx;
+  font-size: var(--fs-md);
+  font-weight: var(--fw-medium);
+  color: var(--ink-soft);
+}
+.cfield__ctrl {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.cinput {
+  flex: 1;
+  min-width: 0;
+  text-align: right;
+  font-family: var(--f-mono);
+  font-size: var(--fs-lg);
+  color: var(--ink);
+}
+.cinput--money {
+  font-size: var(--fs-2xl);
+  font-weight: var(--fw-bold);
+  letter-spacing: -0.02em;
+}
+.cph {
+  color: var(--muted);
+}
+
+/* 品类 picker 显示态 */
+.cpick {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.cpick__val {
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-medium);
+  color: var(--blue);
+}
+.cpick__caret {
+  width: 14rpx;
+  height: 14rpx;
+  border-right: 3rpx solid var(--muted);
+  border-bottom: 3rpx solid var(--muted);
+  transform: rotate(45deg);
+}
+
+/* 总价 ¥ 前缀 */
+.cmoney {
+  flex: 1;
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: var(--sp-1);
+}
+.cmoney__yuan {
+  font-family: var(--f-mono);
+  font-size: var(--fs-lg);
+  color: var(--ink-soft);
+}
+
+/* 数量 */
+.cqty {
+  flex: 1;
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: var(--sp-1);
+}
+.cqty__unit {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+/* — 二选一 segmented — */
+.cseg {
+  display: flex;
+  gap: var(--sp-2);
+  margin: var(--sp-3) 0;
+  padding: 6rpx;
+  background: var(--paper-sink);
+  border-radius: var(--r-pill);
+}
+.cseg__opt {
+  flex: 1;
+  text-align: center;
+  padding: 16rpx 0;
+  border-radius: var(--r-pill);
+}
+.cseg__opt--on {
+  background: var(--paper-card);
+  box-shadow: var(--shadow);
+}
+.cseg__t {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--muted);
+}
+.cseg__opt--on .cseg__t {
+  color: var(--blue);
+}
+
+/* 容量 + 单位 chips */
+.camount {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.cunits {
+  flex-shrink: 0;
+  display: flex;
+  gap: var(--sp-1);
+}
+.cunit {
+  min-width: 60rpx;
+  text-align: center;
+  padding: 8rpx 18rpx;
+  background: var(--paper-sink);
+  border-radius: var(--r-pill);
+}
+.cunit--on {
+  background: var(--blue-bg);
+}
+.cunit__t {
+  font-family: var(--f-mono);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+.cunit--on .cunit__t {
+  color: var(--blue);
+  font-weight: var(--fw-semibold);
+}
+
+/* 比价口径提示(选了 per_100ml/per_100g cohort 后说明按每 100ml/100g 比价) */
+.cform__cap {
+  display: block;
+  margin-top: var(--sp-3);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.cform__hint {
+  display: block;
+  margin-top: var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--pricey);
+}
+
+/* — 品类加载/失败/空 占位卡(轻量,沿用 token,无颜色字面量)— */
+.placeholder {
+  padding: var(--sp-6) var(--sp-4);
+}
+.placeholder__card {
+  background: var(--paper-card);
+  border-radius: var(--r-card);
+  box-shadow: var(--shadow);
+  padding: var(--sp-6) var(--sp-4);
+  text-align: center;
+}
+.placeholder__title {
+  display: block;
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-bold);
+  color: var(--ink);
+}
+.placeholder__hint {
+  display: block;
+  margin-top: var(--sp-2);
+  font-size: var(--fs-md);
+  color: var(--ink-soft);
+}
+.placeholder__sub {
+  display: block;
+  margin-top: var(--sp-1);
+  font-size: var(--fs-sm);
+  color: var(--blue);
+}
+
+/* — 结果卡 — */
+.cres {
+  margin-top: var(--sp-4);
+  background: var(--paper-card);
+  border-radius: var(--r-card);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+/* 结果错误态(POST /compute 失败 / 被服务端 400) */
+.cres--err {
+  padding: var(--sp-4);
+  text-align: center;
+}
+.cres__errt {
+  font-size: var(--fs-md);
+  color: var(--pricey);
+}
+
+/* 结果命中的品类标签 */
+.cres__cohort {
+  display: block;
+  padding: var(--sp-3) var(--sp-4) 0;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.cres__hero {
+  padding: var(--sp-5) var(--sp-4) var(--sp-4);
+  text-align: center;
+  border-top: 8rpx solid var(--line);
+}
+.cres__hero--worth { border-top-color: var(--worth); background: var(--worth-bg); }
+.cres__hero--pricey { border-top-color: var(--pricey); background: var(--pricey-bg); }
+.cres__hero--mid { border-top-color: var(--blue); background: var(--blue-bg); }
+
+.cres__perwrap {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: var(--sp-1);
+}
+.cres__per {
+  font-family: var(--f-mono);
+  font-size: 64rpx;
+  font-weight: var(--fw-black);
+  letter-spacing: -0.02em;
+  line-height: 1;
+  color: var(--ink);
+}
+.cres__perunit {
+  font-size: var(--fs-sm);
+  color: var(--ink-soft);
+}
+.cres__verdict {
+  display: block;
+  margin-top: var(--sp-2);
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+}
+.cres__verdict--worth { color: var(--worth); }
+.cres__verdict--pricey { color: var(--pricey); }
+.cres__verdict--mid { color: var(--blue); }
+
+/* 位置条 */
+.cbarviz {
+  padding: var(--sp-4);
+}
+.cbarviz__track {
+  position: relative;
+  height: 14rpx;
+  background: var(--paper-sink);
+  border-radius: var(--r-pill);
+}
+.cbarviz__dot {
+  position: absolute;
+  top: 50%;
+  width: 28rpx;
+  height: 28rpx;
+  margin-left: -14rpx;
+  border-radius: 50%;
+  border: 4rpx solid var(--paper-card);
+  transform: translateY(-50%);
+  background: var(--blue);
+}
+.cbarviz__dot--worth { background: var(--worth); }
+.cbarviz__dot--pricey { background: var(--pricey); }
+.cbarviz__dot--mid { background: var(--blue); }
+.cbarviz__ends {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: var(--sp-2);
+}
+.cbarviz__end {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+.cbarviz__rank {
+  font-family: var(--f-mono);
+  font-size: var(--fs-xs);
+  color: var(--ink-soft);
+}
+
+/* 计算留痕 */
+.cres__formula {
+  padding: var(--sp-3) var(--sp-4);
+  border-top: 3rpx solid var(--line);
+}
+.cres__formula-h {
+  font-size: var(--fs-sm);
+  color: var(--blue);
+}
+.cres__formula-b {
+  display: block;
+  margin-top: var(--sp-2);
+  font-family: var(--f-mono);
+  font-size: var(--fs-sm);
+  color: var(--ink-soft);
+  line-height: 1.7;
+  word-break: break-all;
+}
+
+/* 邻居 */
+.cres__near {
+  padding: var(--sp-3) var(--sp-3) var(--sp-4);
+  border-top: 3rpx solid var(--line);
+  background: var(--paper);
+}
+.cres__near-h {
+  display: block;
+  margin: var(--sp-1) var(--sp-1) var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--ink-soft);
+}
+
+/* — sticky 主操作 — */
+.cbar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: var(--sp-3) var(--sp-4) calc(var(--sp-4) + env(safe-area-inset-bottom));
+  background: var(--paper-card);
+  border-top: 3rpx solid var(--line);
+}
+.cbtn {
+  height: 92rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--blue);
+  border-radius: var(--r-pill);
+}
+.cbtn--busy {
+  opacity: 0.6;
+}
+.cbtn__t {
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semibold);
+  color: var(--paper-card);
+}

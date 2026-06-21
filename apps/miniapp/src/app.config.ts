@@ -1,7 +1,7 @@
 export default defineAppConfig({
   // pages/board is a non-tab page (category-scoped 分类榜, reached via
   // navigateTo from the 分类 Tab); it keeps a back button and a per-category title.
-  pages: ['pages/index/index', 'pages/category/index', 'pages/mine/index', 'pages/board/index'],
+  pages: ['pages/index/index', 'pages/category/index', 'pages/mine/index', 'pages/board/index', 'pages/compute/index'],
   // Inject only the custom components each page actually uses, cutting startup
   // cost. Satisfies WeChat's "组件按需注入" optimization check.
   lazyCodeLoading: 'requiredComponents',

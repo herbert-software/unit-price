@@ -1,0 +1,75 @@
+/* 搜索无结果比价 CTA。沿用 .lstate 居中态观感;颜色仅 var(--…)。 */
+
+.ccta {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 120rpx 64rpx;
+  box-sizing: border-box;
+  text-align: center;
+}
+
+/* 放大镜 + 斜杠(未找到)字形 — primitive Views,stroke 用 currentColor(继承 --muted）。 */
+.ccta__glyph {
+  position: relative;
+  width: 72rpx;
+  height: 72rpx;
+  margin-bottom: var(--sp-4);
+  color: var(--muted);
+}
+.ccta__glyph-ring {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 50rpx;
+  height: 50rpx;
+  border: 5rpx solid currentColor;
+  border-radius: 50%;
+  box-sizing: border-box;
+}
+.ccta__glyph-handle {
+  position: absolute;
+  right: 2rpx;
+  bottom: 2rpx;
+  width: 28rpx;
+  height: 5rpx;
+  border-radius: 3rpx;
+  background: currentColor;
+  transform: rotate(45deg);
+}
+.ccta__glyph-slash {
+  position: absolute;
+  top: 0;
+  left: 22rpx;
+  width: 5rpx;
+  height: 64rpx;
+  border-radius: 3rpx;
+  background: currentColor;
+  transform: rotate(45deg);
+  opacity: 0.5;
+}
+
+.ccta__title {
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-semibold);
+  color: var(--ink);
+  margin-bottom: var(--sp-2);
+}
+.ccta__hint {
+  font-size: var(--fs-md);
+  color: var(--muted);
+  line-height: 1.6;
+  margin-bottom: var(--sp-5);
+}
+.ccta__btn {
+  padding: 20rpx 56rpx;
+  background: var(--blue);
+  border-radius: var(--r-pill);
+}
+.ccta__btn-t {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+  color: var(--paper-card);
+}

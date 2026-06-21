@@ -31,7 +31,7 @@ export interface RankingsParams {
  * value is a config error, not input to normalize). `caller` names the public
  * helper in the thrown message so misuse points at the right call site.
  */
-function cleanOrigin(base: string, caller: string): string {
+export function cleanOrigin(base: string, caller: string): string {
   let parsed: URL;
   try {
     parsed = new URL(base);

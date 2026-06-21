@@ -14,7 +14,7 @@
 // / empty / first-screen error) with the two error positions kept distinct
 // (whole-screen first-screen error vs list-preserving page error), pull-to-refresh
 // + reach-bottom pagination, and the degraded in-list ad slot (zero-height in v1).
-import { View } from '@tarojs/components';
+import { View, Text } from '@tarojs/components';
 import { useLoad, usePullDownRefresh, useReachBottom } from '@tarojs/taro';
 import Taro from '@tarojs/taro';
 import { Fragment } from 'react';
@@ -40,6 +40,16 @@ function Header() {
           search (board?q=…). NO request fires here; the board page makes the
           read-only GET /rankings?q=… call. See SearchEntry. */}
       <SearchEntry />
+      {/* 比价辅入口(视觉次于搜索)。主入口是搜索无结果态的 ComputeCta;此处给
+          「搜索前就知道没收录」的用户一个常驻 handle。→ pages/compute。 */}
+      <View
+        className="homecalc"
+        onClick={() => { void Taro.navigateTo({ url: '/pages/compute/index' }); }}
+      >
+        <Text className="homecalc__t">
+          店里有、榜上没有的？<Text className="homecalc__lnk">输入规格算单价 ›</Text>
+        </Text>
+      </View>
       <ScopeBar />
     </Fragment>
   );

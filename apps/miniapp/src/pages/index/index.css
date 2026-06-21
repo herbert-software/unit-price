@@ -7,3 +7,19 @@
 .list {
   padding: 16rpx 24rpx 0;
 }
+
+/* 比价辅入口 — 搜索行下方、右对齐、视觉次于搜索(链接非大按钮)。
+   主入口是搜索无结果态的 ComputeCta;此处覆盖「搜索前就知道没收录」的用户。 */
+.homecalc {
+  display: flex;
+  justify-content: flex-end;
+  margin: -12rpx 40rpx 24rpx;
+}
+.homecalc__t {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+.homecalc__lnk {
+  color: var(--blue);
+  font-weight: var(--fw-medium);
+}

@@ -1488,3 +1488,316 @@ describe('GET /categories — governance-exempt public endpoint', () => {
     expect(put).not.toHaveBeenCalled();
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /compute — stateless on-demand 比价 (tier3 deterministic, no AI, no write)
+//
+// The route maps a STRUCTURED ComputeRequest onto core's ParsedSpec, runs core
+// `calculate` (the same per100ml/formula the board stores — byte-for-byte), then
+// positions the user's value in the SAME cohort/rankable/per100ml population the
+// /rankings query serves. These tests inject a FAKE Repository whose ALL write
+// methods THROW (persistence regression guard: a 200 compute must never touch a
+// write path) and whose `listRankings` serves a fixed ascending cohort board.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Build an app for POST /compute. `cohort` is the fixed ascending-by-per100ml
+ * board `listRankings` returns for any category (the route reads the whole
+ * cohort to position). EVERY write method throws — a 200 compute that触发了 any
+ * write fails loudly. `listRankings` is a spy so a test can assert it was (not)
+ * called and with what input.
+ */
+function computeApp(cohort: RankingRow[]) {
+  const listRankings = vi.fn(async (input: ListRankingsInput): Promise<RankingRow[]> => {
+    return cohort.slice(input.offset, input.offset + input.limit);
+  });
+  const upsertRaw = vi.fn(async () => {
+    throw new Error('compute is stateless: upsertRaw must not be called');
+  });
+  const saveParsed = vi.fn(async () => {
+    throw new Error('compute is stateless: saveParsed must not be called');
+  });
+  const saveCorrection = vi.fn(async () => {
+    throw new Error('compute is stateless: saveCorrection must not be called');
+  });
+  const reconcileCategory = vi.fn(async () => {
+    throw new Error('compute is stateless: reconcileCategory must not be called');
+  });
+  const setRankable = vi.fn(async () => {
+    throw new Error('compute is stateless: setRankable must not be called');
+  });
+  const repo = {
+    upsertRaw,
+    saveParsed,
+    saveCorrection,
+    reconcileCategory,
+    setRankable,
+    async getProduct() {
+      return null;
+    },
+    listRankings,
+  } as unknown as Repository;
+  const app = createApp({
+    makeLlm: () => throwingPort,
+    governance: createNoopGovernance(),
+    makeRepo: () => repo,
+  });
+  return { app, listRankings, upsertRaw, saveParsed, saveCorrection, reconcileCategory, setRankable };
+}
+
+/** POST /compute on an app, returning {res, json}. */
+async function postCompute(app: ReturnType<typeof createApp>, body: unknown) {
+  const res = await app.request('/compute', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: typeof body === 'string' ? body : JSON.stringify(body),
+  });
+  let json: any = null;
+  try {
+    json = await res.json();
+  } catch {
+    json = null;
+  }
+  return { res, json };
+}
+
+// A small soft-drink cohort (per_100ml axis), ascending by per100ml — mirrors
+// what listRankings returns (closure + rankable=1 + per100ml NOT NULL).
+const COHORT: RankingRow[] = [
+  row({ id: 'p-1', per100ml: 0.4, storeSku: 'sku-1' }),
+  row({ id: 'p-2', per100ml: 0.6, storeSku: 'sku-2' }),
+  row({ id: 'p-3', per100ml: 1.0, storeSku: 'sku-3' }),
+  row({ id: 'p-4', per100ml: 2.0, storeSku: 'sku-4' }),
+  row({ id: 'p-5', per100ml: 5.0, storeSku: 'sku-5' }),
+];
+
+describe('POST /compute — sufficient input -> 200 + price + positioning', () => {
+  it('totalAmount path: 200 with byte-exact per100ml/formula + rank/percentile/neighbors', async () => {
+    const { app, saveParsed, upsertRaw } = computeApp(COHORT);
+    // 1500ml @ 9 元 → per100ml = 0.6 (= cohort p-2). Cheaper rows: only p-1 (0.4).
+    const { res, json } = await postCompute(app, {
+      totalPrice: 9,
+      totalAmount: { value: 1500, unit: 'ml' },
+      category: 'soft-drink',
+    });
+    expect(res.status).toBe(200);
+    // Byte-exact core output (same calculate the board stores).
+    expect(json.per100ml).toBe(0.6);
+    expect(json.per100g).toBeNull();
+    expect(json.formula).toBe('9 / 1500 * 100');
+    expect(json.axis).toBe('per_100ml');
+    // rank = (# strictly cheaper) + 1 = 1 (only 0.4) + 1 = 2.
+    expect(json.rank).toBe(2);
+    expect(json.total).toBe(5);
+    // percentile = strictly-pricier (1.0,2.0,5.0 → 3) / 5 * 100 = 60.
+    expect(json.percentile).toBeCloseTo(60);
+    // neighbors: up to 3 cheaper (just p-1) + up to 3 pricier-or-equal at/above
+    // the slot (p-2 @0.6 [tie], p-3, p-4). Each is a board projection with rank.
+    expect(json.neighbors.map((n: any) => n.storeSku)).toEqual([
+      'sku-1',
+      'sku-2',
+      'sku-3',
+      'sku-4',
+    ]);
+    expect(json.neighbors[0].rank).toBe(1);
+    expect(json.neighbors[0]).not.toHaveProperty('id');
+    // No write path was ever entered (stateless guard).
+    expect(saveParsed).not.toHaveBeenCalled();
+    expect(upsertRaw).not.toHaveBeenCalled();
+  });
+
+  it('unitSize+quantity path: 200 with the expanded formula verbatim from core', async () => {
+    const { app } = computeApp(COHORT);
+    // 330ml × 24 @ 40 → per100ml = 0.5050505... (cheaper than p-2 @0.6, pricier than p-1 @0.4).
+    const { res, json } = await postCompute(app, {
+      totalPrice: 40,
+      unitSize: { value: 330, unit: 'ml' },
+      quantity: 24,
+      category: 'soft-drink',
+    });
+    expect(res.status).toBe(200);
+    expect(json.per100ml).toBe(0.5050505050505051);
+    expect(json.formula).toBe('40 / (330 * 24 * 1) * 100');
+    expect(json.axis).toBe('per_100ml');
+    // rank: strictly cheaper = p-1 (0.4) only → rank 2.
+    expect(json.rank).toBe(2);
+  });
+
+  it('sets Cache-Control: no-store on the 200', async () => {
+    const { app } = computeApp(COHORT);
+    const { res } = await postCompute(app, {
+      totalPrice: 9,
+      totalAmount: { value: 1500, unit: 'ml' },
+      category: 'soft-drink',
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+  });
+
+  it('reads positioning via listRankings with the validated category + offset 0', async () => {
+    const { app, listRankings } = computeApp(COHORT);
+    await postCompute(app, {
+      totalPrice: 9,
+      totalAmount: { value: 1500, unit: 'ml' },
+      category: 'carbonated',
+    });
+    expect(listRankings).toHaveBeenCalled();
+    const input = listRankings.mock.calls[0]![0];
+    expect(input.category).toBe('carbonated');
+    expect(input.offset).toBe(0);
+    // q is NOT used for positioning (whole cohort).
+    expect(input.q).toBeUndefined();
+  });
+});
+
+describe('POST /compute — insufficient input -> 400 naming the missing class', () => {
+  it('only totalPrice + category (no totalAmount, no unitSize+quantity) -> 400, repo not read', async () => {
+    const { app, listRankings } = computeApp(COHORT);
+    const { res, json } = await postCompute(app, { totalPrice: 9, category: 'soft-drink' });
+    expect(res.status).toBe(400);
+    expect(json.error).toBe('invalid-request');
+    // Message names BOTH acceptable ways to complete the input set.
+    expect(json.message).toContain('总量');
+    expect(json.message).toContain('数量');
+    // No silent per100ml=null 200, and positioning never ran.
+    expect(json).not.toHaveProperty('per100ml');
+    expect(listRankings).not.toHaveBeenCalled();
+  });
+
+  it('unitSize WITHOUT quantity -> 400 (incomplete unitSize path)', async () => {
+    const { app } = computeApp(COHORT);
+    const { res, json } = await postCompute(app, {
+      totalPrice: 9,
+      unitSize: { value: 330, unit: 'ml' },
+      category: 'soft-drink',
+    });
+    expect(res.status).toBe(400);
+    expect(json.error).toBe('invalid-request');
+  });
+});
+
+describe('POST /compute — uncomputable (price 非正/无轴) -> 400 + core warning (never silent 200)', () => {
+  it('totalPrice <= 0 -> 400 carrying core 价格无效 warning', async () => {
+    const { app } = computeApp(COHORT);
+    // The api-client schema rejects totalPrice<=0 at the boundary (positive()),
+    // so this is a 400 invalid-request — never a silent 200 with nulls.
+    const { res, json } = await postCompute(app, {
+      totalPrice: 0,
+      totalAmount: { value: 1500, unit: 'ml' },
+      category: 'soft-drink',
+    });
+    expect(res.status).toBe(400);
+    expect(json.error).toBe('invalid-request');
+    expect(json).not.toHaveProperty('per100ml');
+  });
+});
+
+describe('POST /compute — cross-axis / cross-cohort -> 400 不可比 (positioning forbidden)', () => {
+  it('g input into a per_100ml cohort -> 400 naming the cohort 比价 axis, repo not read', async () => {
+    const { app, listRankings } = computeApp(COHORT);
+    // 500g @ 25 → core lands per100g; soft-drink cohort is per_100ml → mismatch.
+    const { res, json } = await postCompute(app, {
+      totalPrice: 25,
+      totalAmount: { value: 500, unit: 'g' },
+      category: 'soft-drink',
+    });
+    expect(res.status).toBe(400);
+    expect(json.error).toBe('invalid-request');
+    // Message points at the cohort's axis (per 100ml).
+    expect(json.message).toContain('100ml');
+    expect(listRankings).not.toHaveBeenCalled();
+  });
+
+  it('cross-cohort node (beverage root) -> 400, positioning never happens', async () => {
+    const { app, listRankings } = computeApp(COHORT);
+    const { res, json } = await postCompute(app, {
+      totalPrice: 9,
+      totalAmount: { value: 1500, unit: 'ml' },
+      category: 'beverage',
+    });
+    expect(res.status).toBe(400);
+    expect(json.error).toBe('invalid-request');
+    expect(listRankings).not.toHaveBeenCalled();
+  });
+
+  it('cross-cohort node (alcohol parent) -> 400', async () => {
+    const { app, listRankings } = computeApp(COHORT);
+    const { res, json } = await postCompute(app, {
+      totalPrice: 9,
+      totalAmount: { value: 1500, unit: 'ml' },
+      category: 'alcohol',
+    });
+    expect(res.status).toBe(400);
+    expect(json.error).toBe('invalid-request');
+    expect(listRankings).not.toHaveBeenCalled();
+  });
+
+  it('unknown/typo category (non-empty, not in CATEGORY_SLUGS) -> 400 未知品类 (distinct from cross-cohort), repo not read', async () => {
+    const { app, listRankings } = computeApp(COHORT);
+    const { res, json } = await postCompute(app, {
+      totalPrice: 9,
+      totalAmount: { value: 1500, unit: 'ml' },
+      category: 'nonexistent',
+    });
+    expect(res.status).toBe(400);
+    expect(json.error).toBe('invalid-request');
+    // The distinct 未知品类 message (NOT the cross-cohort "跨多个比价口径") — this is
+    // the guard F8 added; without it an unknown slug would resolve null and be
+    // misdiagnosed as cross-cohort. Removing the gate must fail THIS test.
+    expect(json.message).toBe('未知品类');
+    expect(listRankings).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /compute — empty cohort -> 200 + empty neighbors (never 404)', () => {
+  it('no rankable rows -> 200, total=0, rank=1, percentile=0, neighbors=[]', async () => {
+    const { app } = computeApp([]);
+    const { res, json } = await postCompute(app, {
+      totalPrice: 9,
+      totalAmount: { value: 1500, unit: 'ml' },
+      category: 'soft-drink',
+    });
+    expect(res.status).toBe(200);
+    expect(json.total).toBe(0);
+    expect(json.rank).toBe(1);
+    expect(json.percentile).toBe(0);
+    expect(json.neighbors).toEqual([]);
+    // Still a valid computed price (positioning empty ≠ uncomputable).
+    expect(json.per100ml).toBe(0.6);
+    expect(json.formula).toBe('9 / 1500 * 100');
+  });
+
+  it('user value below the whole cohort -> rank 1, one-sided (only pricier) neighbors', async () => {
+    const { app } = computeApp(COHORT);
+    // 5000ml @ 9 → per100ml = 0.18, cheaper than every cohort row (min 0.4).
+    const { res, json } = await postCompute(app, {
+      totalPrice: 9,
+      totalAmount: { value: 5000, unit: 'ml' },
+      category: 'soft-drink',
+    });
+    expect(res.status).toBe(200);
+    expect(json.rank).toBe(1);
+    expect(json.total).toBe(5);
+    expect(json.percentile).toBeCloseTo(100); // cheaper than all 5.
+    // Only the pricier side (the 3 cheapest cohort rows) — no cheaper neighbors.
+    expect(json.neighbors.map((n: any) => n.storeSku)).toEqual(['sku-1', 'sku-2', 'sku-3']);
+  });
+});
+
+describe('POST /compute — invalid request body -> 400 invalid-request', () => {
+  it.each([
+    ['non-JSON body', '{not json'],
+    ['missing category', { totalPrice: 9, totalAmount: { value: 1500, unit: 'ml' } }],
+    ['empty category', { totalPrice: 9, totalAmount: { value: 1500, unit: 'ml' }, category: '' }],
+    ['negative measurement', { totalPrice: 9, totalAmount: { value: -1, unit: 'ml' }, category: 'soft-drink' }],
+    ['bad unit', { totalPrice: 9, totalAmount: { value: 1500, unit: 'oz' }, category: 'soft-drink' }],
+    ['non-integer quantity', { totalPrice: 9, unitSize: { value: 330, unit: 'ml' }, quantity: 1.5, category: 'soft-drink' }],
+  ])('%s -> 400, repo never read, no write', async (_name, body) => {
+    const { app, listRankings, saveParsed } = computeApp(COHORT);
+    const { res, json } = await postCompute(app, body);
+    expect(res.status).toBe(400);
+    expect(json.error).toBe('invalid-request');
+    expect(listRankings).not.toHaveBeenCalled();
+    expect(saveParsed).not.toHaveBeenCalled();
+  });
+});

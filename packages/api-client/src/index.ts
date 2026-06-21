@@ -24,3 +24,15 @@ export {
   parseCategoryTreeResponse,
   type RankingsParams,
 } from './client.js';
+export {
+  ComputeUnitSchema,
+  ComputeMeasurementSchema,
+  ComputeRequestSchema,
+  ComputeResultSchema,
+  buildComputeUrl,
+  parseComputeResponse,
+  type ComputeUnit,
+  type ComputeMeasurement,
+  type ComputeRequest,
+  type ComputeResult,
+} from './compute.js';
