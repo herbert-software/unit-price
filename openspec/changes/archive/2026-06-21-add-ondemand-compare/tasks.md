@@ -29,5 +29,5 @@
 
 - [x] 4.1 全绿（编排者核对）：api-client 97 / db 181 / api 280（+18 条 /compute）/ miniapp 52，workspace `tsc -b` 退出 0。
 - [x] 4.2 契约+状态码已由 `routes.test.ts` 的 in-process 集成测试覆盖（`app.request('/compute', POST)` 走真实 Hono + 假 repo）：足够输入→200（per100ml/formula 与 core 逐字节一致）、缺字段→400、价非正/无轴→400、跨轴→400、跨 cohort→400、零 rankable→200 空 neighbors、no-store、假 repo 写方法零调用。**不另跑 `pnpm --filter api dev`**：Node dev entry 不注入 repo，/compute 定位读会走 persistence-error 分支、跑不了真定位，等价 curl 只重复已绿断言。
-- [ ] 4.3 WeChat 实测（devtools **+ 真机**）：搜索无结果→CTA→比价表单页→提交→结果卡片；紧凑辅入口可达；空/非法不发请求；单位轴随品类约束；响应 `no-store`；端到端一条真机比价。
-- [ ] 4.4 更新受影响 spec 主文件（`/opsx:sync` 或归档时同步 `compute-api` / `miniapp`）。
+- [x] 4.3 WeChat 真机实测**通过**：搜索无结果→CTA→比价表单页→提交→结果卡片、紧凑辅入口、空/非法不发请求、单位轴随品类约束、no-store 端到端均符合预期。服务端侧亦 prod 验活（`POST https://unit-price.herbertgao.me/compute`：软饮 330ml*24@¥40→200 rank6/共67/percentile92.5；未知品类→400「未知品类」）。
+- [x] 4.4 归档时同步受影响 spec 主文件（`compute-api` / `miniapp`）。
