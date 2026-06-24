@@ -23,6 +23,7 @@
 
 ## 3. 验收与存活
 
-- [ ] 3.1 `workflow_dispatch` 手动触发,确认各 `PushObjectCache` **受理成功**(返回 PushTaskId);注意受理≠已热(异步)。
-- [ ] 3.2 **真正热度门(避开自造 HIT)**:预热后**首次** `curl -D -` 各精确热 URL(本轮未先 curl 过它),确认 `X-Cache: HIT`、`Age` 较小、`Cache-Control: public, max-age=86400`。HIT 非由本次探测 curl 造成才算数。
-- [ ] 3.3 **存活 runbook**:记录"GH `schedule` 在仓库 60 天无活动后自动停、cron 丢弃不主动告警"——配**每月人工核对 Actions 运行历史**(命名周期,绑日历/runbook 提醒)确认仍在跑 + `workflow_dispatch` 重跑兜底;(可选)接 healthchecks.io/CloudMonitor 成功心跳告警作确定性替代。
+- [x] 3.1 `workflow_dispatch` 实跑(run 28094322674)= **success**:Configure 步 `--region cn-hangzhou` 无 region 报错(DOA 风险确认关闭)、17 个 URL 逐个返 `PushTaskId`、全失败门未触发。
+- [x] 3.2 **真正热度门已验**:push 过的 cohort 键(soft-drink/baijiu 等,本会话此前未 curl)实测 `X-Cache: HIT TCP_MEM_HIT`、`total ~40ms`、`max-age=86400`;对照"从未 push 的全新键"= MISS、`~1.7s`(~40×)。受理→真实热度确认(闭 CLI-acceptance≠warmth)。首见 `Age+MISS` 是 L1 从已暖 L2 域内填充、非跨境。
+- [x] 3.3 **存活 runbook(记录,长期执行)**:GH `schedule` 仓库 60 天无活动自动停 + cron 漏跑不告警 → **每月人工核对 Actions 历史** + `workflow_dispatch` 兜底;(可选)healthchecks.io/CloudMonitor 心跳。属持续运维实践、随 cron 生命周期执行。
+- [ ] 0.2(可选频率调优,非阻塞):某热 URL 灌入后 ~24h 看 `Age` 是否重置定 (a)/(b) → 决定 12h 是否回落每天;现 12h 为已验证可工作的保守默认。
