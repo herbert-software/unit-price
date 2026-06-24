@@ -1,0 +1,93 @@
+name: CDN Warm
+
+# Periodically push the public-read CDN URLs into domestic Aliyun POPs via
+# PushObjectCache (domestic-scope domain — an overseas runner curl cannot heat
+# it). best-effort: shrinks the cold window after TTL expiry / LRU eviction, does
+# NOT guarantee "never cold". cron is non-on-the-hour and 12h apart (the on-hour
+# slot is GH's most-dropped); workflow_dispatch is the manual / liveness fallback.
+on:
+  schedule:
+    - cron: '17 8,20 * * *' # 16:17 / 04:17 Asia/Shanghai
+  workflow_dispatch: {}
+
+# Only calls an external API; reads no repo content -> no checkout, no scopes.
+permissions: {}
+
+# Never cancel an in-flight warm (schedule + dispatch must not abort each other).
+concurrency:
+  group: cdn-warm
+  cancel-in-progress: false
+
+jobs:
+  warm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Pin aliyun-cli to a specific version + verify sha256 (NO -latest-). Bump
+      # version + sha together from the release's SHASUMS256.txt.
+      # version: 3.0.226
+      - name: Install aliyun CLI (pinned + sha256-verified)
+        run: |
+          set -euo pipefail
+          ver=3.0.226
+          sha=6ef0669b18089f937498d4e39429580d5b94a7145601d8505a08c24762899ae9
+          tgz="aliyun-cli-linux-${ver}-amd64.tgz"
+          curl -fsSL -o "$tgz" \
+            "https://github.com/aliyun/aliyun-cli/releases/download/v${ver}/${tgz}"
+          echo "${sha}  ${tgz}" | sha256sum -c -
+          tar -xzf "$tgz"
+          sudo install -m 0755 aliyun /usr/local/bin/aliyun
+          aliyun version
+
+      # Configure AK from secrets. NO set -x, NO echo of the AK. CDN is a center
+      # endpoint so the region doesn't affect routing, but the CLI requires a
+      # non-empty region to sign the request — a region-less AK-only profile fails
+      # with "region can't be empty", so set the CDN center region cn-hangzhou.
+      - name: Configure credentials
+        env:
+          AK_ID: ${{ secrets.ALIYUN_ACCESS_KEY_ID }}
+          AK_SECRET: ${{ secrets.ALIYUN_ACCESS_KEY_SECRET }}
+        run: |
+          set -euo pipefail
+          : "${AK_ID:?missing secret ALIYUN_ACCESS_KEY_ID}"
+          : "${AK_SECRET:?missing secret ALIYUN_ACCESS_KEY_SECRET}"
+          aliyun configure set --mode AK --access-key-id "$AK_ID" --access-key-secret "$AK_SECRET" --region cn-hangzhou
+
+      # Push each URL independently (per-URL isolation + task-id), one bounded
+      # retry per URL to absorb transient throttle/5xx. ObjectPath = full URL incl.
+      # query string IS the cache key heated into domestic POPs. The 15-slug set =
+      # packages/db/src/seed.ts rankable cohorts: 8 bind per_100ml directly + 7
+      # drill-down leaves that inherit (resolve up-tree). Do NOT regenerate from
+      # WHERE comparable_unit IS NOT NULL on the raw column — that drops the 7
+      # inherited leaves (their raw comparable_unit is null). Manually sync this
+      # list on any PAGE_SIZE / cohort change.
+      - name: Warm CDN URLs
+        run: |
+          set -euo pipefail
+          BASE="https://unit-price.herbert-dev.cn"
+          PAGE_SIZE=20
+          SLUGS="soft-drink carbonated juice-plant coffee-tea drinking-water dairy milk yogurt lactic-drink baijiu wine spirits whisky beer sake-fruit-wine"
+
+          URLS=(
+            "${BASE}/rankings?limit=${PAGE_SIZE}&offset=0"
+            "${BASE}/categories"
+          )
+          for slug in $SLUGS; do
+            URLS+=("${BASE}/rankings?limit=${PAGE_SIZE}&offset=0&category=${slug}")
+          done
+
+          fail=0; total=0
+          for u in "${URLS[@]}"; do
+            total=$((total+1))
+            echo "push: $u"
+            if ! aliyun cdn PushObjectCache --ObjectPath "$u"; then
+              sleep 2
+              if ! aliyun cdn PushObjectCache --ObjectPath "$u"; then
+                echo "WARN push failed: $u"; fail=$((fail+1)); continue
+              fi
+            fi
+          done
+          echo "pushed $((total-fail))/$total"
+          # All failed -> red (AK expired / RAM revoked / CLI changed must not go
+          # silently green). Partial failure stays green + warns (per-URL self-heal).
+          if [ "$fail" -eq "$total" ]; then echo "ALL pushes failed"; exit 1; fi
