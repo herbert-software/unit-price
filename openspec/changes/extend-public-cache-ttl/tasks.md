@@ -2,7 +2,7 @@
 
 - [x] 1.1 `apps/api/src/routes.ts` 把 `PUBLIC_CACHE_CONTROL` 由 `public, max-age=300` 改为 `public, max-age=86400`,并更新其注释说明长 TTL 依据(价格月级稳定、临时优惠经 ingest、遵循源站已确认、purge/预热配套)。
 - [x] 1.2 确认现有测试不锁具体 TTL 值(`apps/api/src/routes.test.ts` 断言 `/max-age=\d+/`、保留 `public`),改值不破坏。
-- [ ] 1.3 `pnpm -C apps/api test`(或仓库等价命令)跑通缓存相关用例,确认 `/rankings`(非搜索)与 `/categories` 仍发 `public, max-age=…`、搜索/`compute` 仍 `no-store`。
+- [x] 1.3 `pnpm -C apps/api test` 跑通(281 passed / 9 files;CI `verify` 亦绿):`/rankings`(非搜索)与 `/categories` 仍发 `public, max-age=…`、搜索/`compute` 仍 `no-store`。
 
 ## 2. 运维契约:runbook + 遵循源站确认
 
