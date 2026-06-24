@@ -12,5 +12,5 @@
 ## 3. 验收与发布
 
 - [x] 3.1 `pnpm -C apps/miniapp test`(94 passed / 8 files,含新增 SWR 纯函数测[shouldUseBoardCache/boardHitState/firstScreenCatchState/revalidateFailState]+ 既有三态/分页不回归)+ typecheck(`tsc --noEmit --ignoreDeprecations 6.0` exit=0;裸跑的 TS5107/TS5101 是仓库既有 tsconfig 弃用告警、非本变更引入)。
-- [ ] 3.2 **(硬合并门——3.3 之前必跑)** devtools + 真机实测。这是 hook 级 wiring + 真实 weapp jitless 校验缓存体 + 冷启动生命周期的**唯一覆盖层**(纯函数测够不着):① 清缓存冷启动 = loading→ready;② **杀进程重开**(冷启动有缓存)= 秒显旧榜 + 后台刷新覆盖;③ 断网/弱网冷启动重开 = **保留旧榜(含空 cohort 不翻整屏错)**、不报错;④ 命中后触底翻页**不重复首页**(验 `offsetRef=cached.length`);⑤ 共享 hook 波及面:从品类树下钻一个 **category board** 后杀进程重开 → 确认按该 cohort 键命中、且搜索板(有效 q)从不写缓存。
-- [ ] 3.3 开 feature 分支提 PR、review 后合并 main(**前置:3.2 已实跑通过**)。
+- [x] 3.2 **(硬合并门——3.3 之前必跑)** devtools + 真机实测**已通过**。这是 hook 级 wiring + 真实 weapp jitless 校验缓存体 + 冷启动生命周期的**唯一覆盖层**(纯函数测够不着):① 清缓存冷启动 = loading→ready;② **杀进程重开**(冷启动有缓存)= 秒显旧榜 + 后台刷新覆盖;③ 断网/弱网冷启动重开 = **保留旧榜(含空 cohort 不翻整屏错)**、不报错;④ 命中后触底翻页**不重复首页**(验 `offsetRef=cached.length`);⑤ 共享 hook 波及面:从品类树下钻一个 **category board** 后杀进程重开 → 确认按该 cohort 键命中、且搜索板(有效 q)从不写缓存。
+- [x] 3.3 PR #52 已 review(review-loop 两轮 + CodeRabbit)、3.2 真机通过后合并 main。
