@@ -23,7 +23,7 @@
     "react-dom": "^19.2.7"
   },
   "devDependencies": {
-    "@babel/core": "^7.24.0",
+    "@babel/core": "^8.0.1",
     "@babel/preset-react": "^7.24.0",
     "@tarojs/cli": "4.2.0",
     "esbuild": "^0.28.1",
