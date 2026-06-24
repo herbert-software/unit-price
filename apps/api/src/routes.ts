@@ -144,13 +144,17 @@ export const BG_POOL = 5;
  * Cache-Control for the public read-only GET endpoints (/rankings, /categories).
  * Set ONLY on the 200 success path so the edge layers already in front of the
  * worker — Aliyun CDN's China POP (the front of the slow cross-border hop) and
- * Cloudflare — cache the JSON and most reads never reach the worker/D1. 300s (5
- * min) trades freshness for hit rate: ingests are infrequent manual batches, so
- * this staleness is acceptable. Errors (400/500) carry no header → never cached.
+ * Cloudflare — cache the JSON and most reads never reach the worker/D1. The data
+ * is near-static: catalog prices hold for months, only the occasional temp promo
+ * moves, and both arrive via infrequent manual /ingest batches — so a long TTL is
+ * what maximizes the China-POP hit rate (the whole point: dodge the cross-border
+ * hop). 1 day caps staleness if a purge is ever missed (self-heals next day); to
+ * push a promo out sooner, purge the CDN after the ingest/backfill that added it
+ * (see docs/backfill-runbook.md). Errors (400/500) carry no header → never cached.
  * Tune the TTL here. (Aliyun CDN keeps the query string in its cache key by
  * default, so /rankings?category=… variants cache separately.)
  */
-export const PUBLIC_CACHE_CONTROL = 'public, max-age=300';
+export const PUBLIC_CACHE_CONTROL = 'public, max-age=86400';
 
 /**
  * Neighbors returned each side of the user's value by POST /compute (up to N
