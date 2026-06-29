@@ -28,7 +28,7 @@
     "@types/node": "^25.9.2",
     "better-sqlite3": "^12.11.1",
     "drizzle-kit": "^0.31.10",
-    "miniflare": "^4.20260617.1",
+    "miniflare": "^4.20260625.0",
     "tsx": "^4.22.4",
     "vitest": "^4.1.9"
   }
